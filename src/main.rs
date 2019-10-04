@@ -9,27 +9,44 @@ use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
 
 const BASE_FREQUENCY: f32 = 440.0;
 
+#[derive(Copy)]
+enum Gate {
+    High,
+    Low,
+}
+
+impl Clone for Gate {
+    fn clone(&self) -> Gate {
+        *self
+    }
+}
+
 fn sine(frequency: f32, time: f32, sample_rate: f32) -> f32 {
     (frequency * time * 2.0 * PI / sample_rate).sin()
 }
 
 fn main() -> Result<(), failure::Error> {
     let mut frequency = BASE_FREQUENCY;
+    let mut gate = Gate::Low;
 
-    let (sender, receiver) = mpsc::channel();
+    let (fequency_sender, frequency_receiver) = mpsc::channel();
+    let (gate_sender, gate_receiver) = mpsc::channel();
 
     let client = coremidi::Client::new("example-client").unwrap();
 
     let callback = move |packet_list: &coremidi::PacketList| {
-        let sender = sender.clone();
+        let frequency_sender = fequency_sender.clone();
         for packet in packet_list.iter() {
             match packet.data() {
                 // Note off
-                [128, _note, _velocity] => (),
+                [128, _note, _velocity] => {
+                    gate_sender.send(Gate::Low).unwrap();
+                }
                 // Note on
                 [144, note, _velocity] => {
                     let freq = BASE_FREQUENCY * (2.0f32).powf(f32::from(*note as i8 - 69) / 12.0);
-                    sender.send(freq).unwrap();
+                    frequency_sender.send(freq).unwrap();
+                    gate_sender.send(Gate::High).unwrap();
                 }
                 _ => (),
             }
@@ -52,19 +69,24 @@ fn main() -> Result<(), failure::Error> {
     let sample_rate = format.sample_rate.0 as f32;
     let mut sample_clock = 0f32;
 
-    let mut next_value = |frequency| {
+    let mut next_value = |frequency, gate| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
-
-        sine(frequency, sample_clock, sample_rate)
+        match gate {
+            Gate::High => sine(frequency, sample_clock, sample_rate),
+            Gate::Low => 0.0,
+        }
     };
 
     event_loop.run(move |id, result| {
-        match receiver.try_recv() {
-            Ok(freq) => {
-                frequency = freq;
-            }
+        match frequency_receiver.try_recv() {
+            Ok(next_frequency) => frequency = next_frequency,
             _ => (),
         };
+
+        match gate_receiver.try_recv() {
+            Ok(next_gate) => gate = next_gate,
+            _ => (),
+        }
 
         let data = match result {
             Ok(data) => data,
@@ -79,7 +101,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::U16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = ((next_value(frequency) * 0.5 + 0.5) * std::u16::MAX as f32) as u16;
+                    let value =
+                        ((next_value(frequency, gate) * 0.5 + 0.5) * std::u16::MAX as f32) as u16;
                     for out in sample.iter_mut() {
                         *out = value;
                     }
@@ -89,7 +112,7 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::I16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = (next_value(frequency) * std::i16::MAX as f32) as i16;
+                    let value = (next_value(frequency, gate) * std::i16::MAX as f32) as i16;
                     for out in sample.iter_mut() {
                         *out = value;
                     }
@@ -99,7 +122,7 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::F32(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = next_value(frequency);
+                    let value = next_value(frequency, gate);
                     for out in sample.iter_mut() {
                         *out = value;
                     }
