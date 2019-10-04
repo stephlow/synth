@@ -27,15 +27,19 @@ fn sine(frequency: f32, time: f32, sample_rate: f32) -> f32 {
 
 fn main() -> Result<(), failure::Error> {
     let mut frequency = BASE_FREQUENCY;
+    let mut velocity: f32 = 0.0;
     let mut gate = Gate::Low;
 
     let (fequency_sender, frequency_receiver) = mpsc::channel();
+    let (velocity_sender, velocity_receiver) = mpsc::channel();
     let (gate_sender, gate_receiver) = mpsc::channel();
 
     let client = coremidi::Client::new("example-client").unwrap();
 
     let callback = move |packet_list: &coremidi::PacketList| {
         let frequency_sender = fequency_sender.clone();
+        let velocity_sender = velocity_sender.clone();
+        let gate_sender = gate_sender.clone();
         for packet in packet_list.iter() {
             match packet.data() {
                 // Note off
@@ -43,9 +47,11 @@ fn main() -> Result<(), failure::Error> {
                     gate_sender.send(Gate::Low).unwrap();
                 }
                 // Note on
-                [144, note, _velocity] => {
+                [144, note, velocity] => {
                     let freq = BASE_FREQUENCY * (2.0f32).powf(f32::from(*note as i8 - 69) / 12.0);
                     frequency_sender.send(freq).unwrap();
+                    let vel = f32::from(*velocity) / 128.0;
+                    velocity_sender.send(vel).unwrap();
                     gate_sender.send(Gate::High).unwrap();
                 }
                 _ => (),
@@ -69,10 +75,10 @@ fn main() -> Result<(), failure::Error> {
     let sample_rate = format.sample_rate.0 as f32;
     let mut sample_clock = 0f32;
 
-    let mut next_value = |frequency, gate| {
+    let mut next_value = |frequency, gate, velocity| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
         match gate {
-            Gate::High => sine(frequency, sample_clock, sample_rate),
+            Gate::High => sine(frequency, sample_clock, sample_rate) * velocity,
             Gate::Low => 0.0,
         }
     };
@@ -85,6 +91,11 @@ fn main() -> Result<(), failure::Error> {
 
         match gate_receiver.try_recv() {
             Ok(next_gate) => gate = next_gate,
+            _ => (),
+        }
+
+        match velocity_receiver.try_recv() {
+            Ok(next_velocity) => velocity = next_velocity,
             _ => (),
         }
 
@@ -101,8 +112,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::U16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value =
-                        ((next_value(frequency, gate) * 0.5 + 0.5) * std::u16::MAX as f32) as u16;
+                    let value = ((next_value(frequency, gate, velocity) * 0.5 + 0.5)
+                        * std::u16::MAX as f32) as u16;
                     for out in sample.iter_mut() {
                         *out = value;
                     }
@@ -112,7 +123,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::I16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = (next_value(frequency, gate) * std::i16::MAX as f32) as i16;
+                    let value =
+                        (next_value(frequency, gate, velocity) * std::i16::MAX as f32) as i16;
                     for out in sample.iter_mut() {
                         *out = value;
                     }
@@ -122,7 +134,7 @@ fn main() -> Result<(), failure::Error> {
                 buffer: cpal::UnknownTypeOutputBuffer::F32(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = next_value(frequency, gate);
+                    let value = next_value(frequency, gate, velocity);
                     for out in sample.iter_mut() {
                         *out = value;
                     }
