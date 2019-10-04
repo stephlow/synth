@@ -14,6 +14,8 @@ fn sine(frequency: f32, time: f32, sample_rate: f32) -> f32 {
 }
 
 fn main() -> Result<(), failure::Error> {
+    let mut frequency = BASE_FREQUENCY;
+
     let (sender, receiver) = mpsc::channel();
 
     let client = coremidi::Client::new("example-client").unwrap();
@@ -55,8 +57,6 @@ fn main() -> Result<(), failure::Error> {
 
         sine(frequency, sample_clock, sample_rate)
     };
-
-    let mut frequency = 440.0;
 
     event_loop.run(move |id, result| {
         match receiver.try_recv() {
