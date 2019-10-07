@@ -2,10 +2,11 @@ extern crate coremidi;
 extern crate cpal;
 extern crate failure;
 
-use std::f32::consts::PI;
 use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
+
+mod oscillator;
 
 const BASE_FREQUENCY: f32 = 440.0;
 
@@ -19,10 +20,6 @@ impl Clone for Gate {
     fn clone(&self) -> Gate {
         *self
     }
-}
-
-fn sine(frequency: f32, time: f32, sample_rate: f32) -> f32 {
-    (frequency * time * 2.0 * PI / sample_rate).sin()
 }
 
 fn main() -> Result<(), failure::Error> {
@@ -78,7 +75,7 @@ fn main() -> Result<(), failure::Error> {
     let mut next_value = |frequency, gate, velocity| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
         match gate {
-            Gate::High => sine(frequency, sample_clock, sample_rate) * velocity,
+            Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
             Gate::Low => 0.0,
         }
     };
