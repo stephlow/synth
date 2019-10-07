@@ -6,26 +6,15 @@ use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
 
+mod lib;
 mod oscillator;
 
 const BASE_FREQUENCY: f32 = 440.0;
 
-#[derive(Copy)]
-enum Gate {
-    High,
-    Low,
-}
-
-impl Clone for Gate {
-    fn clone(&self) -> Gate {
-        *self
-    }
-}
-
 fn main() -> Result<(), failure::Error> {
     let mut frequency = BASE_FREQUENCY;
     let mut velocity: f32 = 0.0;
-    let mut gate = Gate::Low;
+    let mut gate = lib::Gate::Low;
 
     let (fequency_sender, frequency_receiver) = mpsc::channel();
     let (velocity_sender, velocity_receiver) = mpsc::channel();
@@ -41,7 +30,7 @@ fn main() -> Result<(), failure::Error> {
             match packet.data() {
                 // Note off
                 [128, _note, _velocity] => {
-                    gate_sender.send(Gate::Low).unwrap();
+                    gate_sender.send(lib::Gate::Low).unwrap();
                 }
                 // Note on
                 [144, note, velocity] => {
@@ -49,7 +38,7 @@ fn main() -> Result<(), failure::Error> {
                     frequency_sender.send(freq).unwrap();
                     let vel = f32::from(*velocity) / 128.0;
                     velocity_sender.send(vel).unwrap();
-                    gate_sender.send(Gate::High).unwrap();
+                    gate_sender.send(lib::Gate::High).unwrap();
                 }
                 _ => (),
             }
@@ -75,8 +64,8 @@ fn main() -> Result<(), failure::Error> {
     let mut next_value = |frequency, gate, velocity| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
         match gate {
-            Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
-            Gate::Low => 0.0,
+            lib::Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
+            lib::Gate::Low => 0.0,
         }
     };
 
