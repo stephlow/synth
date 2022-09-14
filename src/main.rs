@@ -5,16 +5,19 @@ extern crate failure;
 use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
+use cpal::{StreamData, UnknownTypeOutputBuffer};
 
 mod lib;
 mod oscillator;
+
+use lib::Gate;
 
 const BASE_FREQUENCY: f32 = 440.0;
 
 fn main() -> Result<(), failure::Error> {
     let mut frequency = BASE_FREQUENCY;
     let mut velocity: f32 = 0.0;
-    let mut gate = lib::Gate::Low;
+    let mut gate = Gate::Low;
 
     let (fequency_sender, frequency_receiver) = mpsc::channel();
     let (velocity_sender, velocity_receiver) = mpsc::channel();
@@ -30,7 +33,7 @@ fn main() -> Result<(), failure::Error> {
             match packet.data() {
                 // Note off
                 [128, _note, _velocity] => {
-                    gate_sender.send(lib::Gate::Low).unwrap();
+                    gate_sender.send(Gate::Low).unwrap();
                 }
                 // Note on
                 [144, note, velocity] => {
@@ -38,7 +41,7 @@ fn main() -> Result<(), failure::Error> {
                     frequency_sender.send(freq).unwrap();
                     let vel = f32::from(*velocity) / 128.0;
                     velocity_sender.send(vel).unwrap();
-                    gate_sender.send(lib::Gate::High).unwrap();
+                    gate_sender.send(Gate::High).unwrap();
                 }
                 _ => (),
             }
@@ -56,7 +59,7 @@ fn main() -> Result<(), failure::Error> {
     let format = device.default_output_format()?;
     let event_loop = host.event_loop();
     let stream_id = event_loop.build_output_stream(&device, &format)?;
-    event_loop.play_stream(stream_id.clone())?;
+    event_loop.play_stream(stream_id)?;
 
     let sample_rate = format.sample_rate.0 as f32;
     let mut sample_clock = 0f32;
@@ -64,25 +67,22 @@ fn main() -> Result<(), failure::Error> {
     let mut next_value = |frequency, gate, velocity| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
         match gate {
-            lib::Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
-            lib::Gate::Low => 0.0,
+            Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
+            Gate::Low => 0.0,
         }
     };
 
     event_loop.run(move |id, result| {
-        match frequency_receiver.try_recv() {
-            Ok(next_frequency) => frequency = next_frequency,
-            _ => (),
-        };
-
-        match gate_receiver.try_recv() {
-            Ok(next_gate) => gate = next_gate,
-            _ => (),
+        if let Ok(next_frequency) = frequency_receiver.try_recv() {
+            frequency = next_frequency;
         }
 
-        match velocity_receiver.try_recv() {
-            Ok(next_velocity) => velocity = next_velocity,
-            _ => (),
+        if let Ok(next_gate) = gate_receiver.try_recv() {
+            gate = next_gate;
+        }
+
+        if let Ok(next_velocity) = velocity_receiver.try_recv() {
+            velocity = next_velocity;
         }
 
         let data = match result {
@@ -94,8 +94,8 @@ fn main() -> Result<(), failure::Error> {
         };
 
         match data {
-            cpal::StreamData::Output {
-                buffer: cpal::UnknownTypeOutputBuffer::U16(mut buffer),
+            StreamData::Output {
+                buffer: UnknownTypeOutputBuffer::U16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
                     let value = ((next_value(frequency, gate, velocity) * 0.5 + 0.5)
@@ -105,8 +105,8 @@ fn main() -> Result<(), failure::Error> {
                     }
                 }
             }
-            cpal::StreamData::Output {
-                buffer: cpal::UnknownTypeOutputBuffer::I16(mut buffer),
+            StreamData::Output {
+                buffer: UnknownTypeOutputBuffer::I16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
                     let value =
@@ -116,8 +116,8 @@ fn main() -> Result<(), failure::Error> {
                     }
                 }
             }
-            cpal::StreamData::Output {
-                buffer: cpal::UnknownTypeOutputBuffer::F32(mut buffer),
+            StreamData::Output {
+                buffer: UnknownTypeOutputBuffer::F32(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
                     let value = next_value(frequency, gate, velocity);
