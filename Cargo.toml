@@ -2,7 +2,7 @@
 name = "synth"
 version = "0.1.0"
 authors = ["Stephan Lagerwaard <stephanlagerwaard@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 coremidi = "0.4.0"
