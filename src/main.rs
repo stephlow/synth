@@ -1,50 +1,61 @@
 extern crate coremidi;
 extern crate cpal;
 extern crate failure;
+extern crate wmidi;
 
+use coremidi::{Client, PacketList};
+use oscillator::sine;
 use std::sync::mpsc;
+use wmidi::{MidiMessage, Note, Velocity};
 
 use cpal::traits::{DeviceTrait, EventLoopTrait, HostTrait};
 use cpal::{StreamData, UnknownTypeOutputBuffer};
 
-mod lib;
+mod gate;
 mod oscillator;
 
-use lib::Gate;
+use std::convert::TryFrom;
 
-const BASE_FREQUENCY: f32 = 440.0;
+#[derive(Default, Clone, Debug)]
+struct State {
+    voices: Vec<(Note, Velocity)>,
+}
+
+impl State {
+    fn add_voice(&mut self, note: Note, velocity: Velocity) {
+        self.voices.push((note, velocity));
+    }
+
+    fn remove_voice(&mut self, note: Note, velocity: Velocity) {
+        self.voices.retain(|(n, v)| !(n == &note && v == &velocity));
+    }
+}
+
+fn handle_midi_message(state: &mut State, bytes: &[u8]) {
+    if let Ok(message) = MidiMessage::try_from(bytes) {
+        match message {
+            MidiMessage::NoteOn(_, note, velocity) => {
+                state.add_voice(note, velocity);
+            }
+            MidiMessage::NoteOff(_, note, velocity) => {
+                state.remove_voice(note, velocity);
+            }
+            _ => {}
+        }
+    }
+}
 
 fn main() -> Result<(), failure::Error> {
-    let mut frequency = BASE_FREQUENCY;
-    let mut velocity: f32 = 0.0;
-    let mut gate = Gate::Low;
+    let mut state: State = Default::default();
 
-    let (fequency_sender, frequency_receiver) = mpsc::channel();
-    let (velocity_sender, velocity_receiver) = mpsc::channel();
-    let (gate_sender, gate_receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
 
-    let client = coremidi::Client::new("example-client").unwrap();
+    let client = Client::new("example-client").unwrap();
 
-    let callback = move |packet_list: &coremidi::PacketList| {
-        let frequency_sender = fequency_sender.clone();
-        let velocity_sender = velocity_sender.clone();
-        let gate_sender = gate_sender.clone();
+    let callback = move |packet_list: &PacketList| {
         for packet in packet_list.iter() {
-            match packet.data() {
-                // Note off
-                [128, _note, _velocity] => {
-                    gate_sender.send(Gate::Low).unwrap();
-                }
-                // Note on
-                [144, note, velocity] => {
-                    let freq = BASE_FREQUENCY * (2.0f32).powf(f32::from(*note as i8 - 69) / 12.0);
-                    frequency_sender.send(freq).unwrap();
-                    let vel = f32::from(*velocity) / 128.0;
-                    velocity_sender.send(vel).unwrap();
-                    gate_sender.send(Gate::High).unwrap();
-                }
-                _ => (),
-            }
+            handle_midi_message(&mut state, packet.data());
+            sender.send(state.clone()).unwrap();
         }
     };
 
@@ -64,25 +75,20 @@ fn main() -> Result<(), failure::Error> {
     let sample_rate = format.sample_rate.0 as f32;
     let mut sample_clock = 0f32;
 
-    let mut next_value = |frequency, gate, velocity| {
+    let mut next_value = |state: State| {
         sample_clock = (sample_clock + 1.0) % sample_rate;
-        match gate {
-            Gate::High => oscillator::sine(frequency, sample_clock, sample_rate) * velocity,
-            Gate::Low => 0.0,
+
+        match state.voices.first() {
+            Some((note, _frequency)) => sine(note.to_freq_f32(), sample_clock, sample_rate),
+            _ => 0.0,
         }
     };
 
     event_loop.run(move |id, result| {
-        if let Ok(next_frequency) = frequency_receiver.try_recv() {
-            frequency = next_frequency;
-        }
+        let mut state: State = Default::default();
 
-        if let Ok(next_gate) = gate_receiver.try_recv() {
-            gate = next_gate;
-        }
-
-        if let Ok(next_velocity) = velocity_receiver.try_recv() {
-            velocity = next_velocity;
+        if let Ok(new) = receiver.try_recv() {
+            state = new;
         }
 
         let data = match result {
@@ -98,10 +104,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: UnknownTypeOutputBuffer::U16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = ((next_value(frequency, gate, velocity) * 0.5 + 0.5)
-                        * std::u16::MAX as f32) as u16;
                     for out in sample.iter_mut() {
-                        *out = value;
+                        *out = next_value(state.clone()) as u16;
                     }
                 }
             }
@@ -109,10 +113,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: UnknownTypeOutputBuffer::I16(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value =
-                        (next_value(frequency, gate, velocity) * std::i16::MAX as f32) as i16;
                     for out in sample.iter_mut() {
-                        *out = value;
+                        *out = next_value(state.clone()) as i16;
                     }
                 }
             }
@@ -120,9 +122,8 @@ fn main() -> Result<(), failure::Error> {
                 buffer: UnknownTypeOutputBuffer::F32(mut buffer),
             } => {
                 for sample in buffer.chunks_mut(format.channels as usize) {
-                    let value = next_value(frequency, gate, velocity);
                     for out in sample.iter_mut() {
-                        *out = value;
+                        *out = next_value(state.clone()) as f32;
                     }
                 }
             }
