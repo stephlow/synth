@@ -7,4 +7,4 @@ edition = "2021"
 [dependencies]
 coremidi = "0.7.0"
 cpal = "0.10.0"
-failure = "0.1.5"
+failure = "0.1.8"
