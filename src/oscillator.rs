@@ -5,6 +5,7 @@ pub struct Oscillator {
     pub current_sample_index: f32,
     pub frequency_hz: f32,
     pub gate: Gate,
+    pub gain: f32,
 }
 
 #[derive(Debug)]
@@ -29,11 +30,13 @@ impl Oscillator {
             current_sample_index: 0.0,
             frequency_hz: 440.0,
             gate: Gate::Low,
+            gain: 0.0,
         }
     }
 
-    pub fn note_on(&mut self, freq: f32) {
+    pub fn note_on(&mut self, freq: f32, gain: f32) {
         self.frequency_hz = freq;
+        self.gain = gain;
         self.gate = Gate::High;
     }
 
@@ -92,7 +95,7 @@ impl Oscillator {
     }
 
     pub fn tick(&mut self) -> f32 {
-        match self.gate {
+        let wave = match self.gate {
             Gate::High => match self.waveform {
                 Waveform::Sine => self.sine_wave(),
                 Waveform::Square => self.square_wave(),
@@ -100,6 +103,8 @@ impl Oscillator {
                 Waveform::Triangle => self.triangle_wave(),
             },
             Gate::Low => 0.,
-        }
+        };
+
+        wave * self.gain
     }
 }

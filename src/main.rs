@@ -8,21 +8,21 @@ use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use std::sync::mpsc::{self, Receiver};
 use synth::Synth;
-use wmidi::{MidiMessage, Note};
+use wmidi::{MidiMessage, Note, Velocity};
 
 mod oscillator;
 mod synth;
 
 pub enum MidiEvent {
-    NoteOn(Note),
-    NoteOff(Note),
+    NoteOn(Note, Velocity),
+    NoteOff(Note, Velocity),
 }
 
 fn handle_midi_message(bytes: &[u8]) -> Option<MidiEvent> {
     if let Ok(message) = MidiMessage::try_from(bytes) {
         match message {
-            MidiMessage::NoteOn(_, note, _velocity) => Some(MidiEvent::NoteOn(note)),
-            MidiMessage::NoteOff(_, note, _velocity) => Some(MidiEvent::NoteOff(note)),
+            MidiMessage::NoteOn(_, note, velocity) => Some(MidiEvent::NoteOn(note, velocity)),
+            MidiMessage::NoteOff(_, note, velocity) => Some(MidiEvent::NoteOff(note, velocity)),
             _ => None,
         }
     } else {
@@ -148,8 +148,8 @@ where
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             if let Ok(midi_event) = rx.try_recv() {
                 match midi_event {
-                    MidiEvent::NoteOn(note) => synth.note_on(note),
-                    MidiEvent::NoteOff(note) => synth.note_off(note),
+                    MidiEvent::NoteOn(note, velocity) => synth.note_on(note, velocity),
+                    MidiEvent::NoteOff(note, velocity) => synth.note_off(note, velocity),
                 }
             }
             process_frame(output, &mut synth, num_channels)
