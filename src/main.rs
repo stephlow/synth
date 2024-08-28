@@ -1,29 +1,30 @@
 use std::sync::mpsc::{self, Receiver};
 
-use coremidi::{Client, PacketList};
+use coremidi::{Client, EventList, PacketList, Protocol, Source, Sources};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SizedSample,
 };
 use cpal::{FromSample, Sample};
-use oscillator::Oscillator;
+use synth::Synth;
 use wmidi::{MidiMessage, Note};
 
 mod oscillator;
+mod synth;
 
 static MIDI_CLIENT_NAME: &str = "example-client";
 static MIDI_DESTINATION_NAME: &str = "example-dest";
 
 pub enum MidiEvent {
     NoteOn(Note),
-    NoteOff,
+    NoteOff(Note),
 }
 
 fn handle_midi_message(bytes: &[u8]) -> Option<MidiEvent> {
     if let Ok(message) = MidiMessage::try_from(bytes) {
         match message {
             MidiMessage::NoteOn(_, note, _velocity) => Some(MidiEvent::NoteOn(note)),
-            MidiMessage::NoteOff(_, _note, _velocity) => Some(MidiEvent::NoteOff),
+            MidiMessage::NoteOff(_, note, _velocity) => Some(MidiEvent::NoteOff(note)),
             _ => None,
         }
     } else {
@@ -105,7 +106,7 @@ where
     T: SizedSample + FromSample<f32>,
 {
     let num_channels = config.channels as usize;
-    let mut oscillator = Oscillator::new(config.sample_rate.0 as f32);
+    let mut synth = Synth::new(config.sample_rate.0 as f32);
     let err_fn = |err| eprintln!("Error building output sound stream: {}", err);
 
     let time_at_start = std::time::Instant::now();
@@ -117,14 +118,14 @@ where
             if let Ok(midi_event) = rx.try_recv() {
                 match midi_event {
                     MidiEvent::NoteOn(note) => {
-                        oscillator.note_on(note.to_freq_f32());
+                        synth.note_on(note);
                     }
-                    MidiEvent::NoteOff => {
-                        oscillator.note_off();
+                    MidiEvent::NoteOff(note) => {
+                        synth.note_off(note);
                     }
                 }
             }
-            process_frame(output, &mut oscillator, num_channels)
+            process_frame(output, &mut synth, num_channels)
         },
         err_fn,
         None,
@@ -133,15 +134,12 @@ where
     Ok(stream)
 }
 
-fn process_frame<SampleType>(
-    output: &mut [SampleType],
-    oscillator: &mut Oscillator,
-    num_channels: usize,
-) where
+fn process_frame<SampleType>(output: &mut [SampleType], synth: &mut Synth, num_channels: usize)
+where
     SampleType: Sample + FromSample<f32>,
 {
     for frame in output.chunks_mut(num_channels) {
-        let value: SampleType = SampleType::from_sample(oscillator.tick());
+        let value: SampleType = SampleType::from_sample(synth.tick());
 
         for sample in frame.iter_mut() {
             *sample = value;

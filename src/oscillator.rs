@@ -1,3 +1,4 @@
+#[derive(Debug)]
 pub struct Oscillator {
     pub sample_rate: f32,
     pub waveform: Waveform,
@@ -6,6 +7,7 @@ pub struct Oscillator {
     pub gate: Gate,
 }
 
+#[derive(Debug)]
 pub enum Waveform {
     Sine,
     Square,
@@ -13,6 +15,7 @@ pub enum Waveform {
     Triangle,
 }
 
+#[derive(Debug)]
 pub enum Gate {
     High,
     Low,
