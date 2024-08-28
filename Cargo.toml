@@ -6,6 +6,6 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.86"
-coremidi = "0.8.0"
 cpal = "0.15.3"
+midir = "0.10.0"
 wmidi = "4.0.10"

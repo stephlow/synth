@@ -1,4 +1,4 @@
-use wmidi::{Note, Velocity};
+use wmidi::Note;
 
 use crate::oscillator::Oscillator;
 
@@ -40,7 +40,7 @@ impl Synth {
                 return n.to_freq_f32() == note.to_freq_f32();
             }
 
-            return false;
+            false
         }) {
             return Some(index);
         }

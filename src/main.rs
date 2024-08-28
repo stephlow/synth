@@ -1,19 +1,17 @@
-use std::sync::mpsc::{self, Receiver};
-
-use coremidi::{Client, EventList, PacketList, Protocol, Source, Sources};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SizedSample,
 };
 use cpal::{FromSample, Sample};
+use midir::{Ignore, MidiInput};
+use std::error::Error;
+use std::io::{stdin, stdout, Write};
+use std::sync::mpsc::{self, Receiver};
 use synth::Synth;
 use wmidi::{MidiMessage, Note};
 
 mod oscillator;
 mod synth;
-
-static MIDI_CLIENT_NAME: &str = "example-client";
-static MIDI_DESTINATION_NAME: &str = "example-dest";
 
 pub enum MidiEvent {
     NoteOn(Note),
@@ -32,28 +30,64 @@ fn handle_midi_message(bytes: &[u8]) -> Option<MidiEvent> {
     }
 }
 
-fn main() -> anyhow::Result<()> {
-    let (tx, rx) = mpsc::channel();
+fn main() -> Result<(), Box<dyn Error>> {
+    let (tx, rx) = mpsc::channel::<MidiEvent>();
 
-    let midi_client = Client::new(MIDI_CLIENT_NAME).unwrap();
+    let mut midi_in = MidiInput::new("midir reading input")?;
+    midi_in.ignore(Ignore::None);
 
-    let tx = tx.clone();
-    let callback = move |packet_list: &PacketList| {
-        for packet in packet_list.iter() {
-            if let Some(event) = handle_midi_message(packet.data()) {
-                tx.send(event).unwrap();
+    // Get an input port (read from console if multiple are available)
+    let in_ports = midi_in.ports();
+    let in_port = match in_ports.len() {
+        0 => return Err("no input port found".into()),
+        1 => {
+            println!(
+                "Choosing the only available input port: {}",
+                midi_in.port_name(&in_ports[0]).unwrap()
+            );
+            &in_ports[0]
+        }
+        _ => {
+            println!("\nAvailable input ports:");
+            for (i, p) in in_ports.iter().enumerate() {
+                println!("{}: {}", i, midi_in.port_name(p).unwrap());
             }
+            print!("Please select input port: ");
+            stdout().flush()?;
+            let mut input = String::new();
+            stdin().read_line(&mut input)?;
+            in_ports
+                .get(input.trim().parse::<usize>()?)
+                .ok_or("invalid input port selected")?
         }
     };
 
-    let _destination = midi_client
-        .virtual_destination(MIDI_DESTINATION_NAME, callback)
-        .unwrap();
+    println!("\nOpening connection");
+    let in_port_name = midi_in.port_name(in_port)?;
+
+    let tx = tx.clone();
+    // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
+    let _conn_in = midi_in.connect(
+        in_port,
+        "midir-read-input",
+        move |_, bytes, _| {
+            if let Some(message) = handle_midi_message(bytes) {
+                tx.send(message).unwrap();
+            }
+        },
+        (),
+    )?;
+
+    println!(
+        "Connection open, reading input from '{}' (press enter to exit) ...",
+        in_port_name
+    );
 
     let stream = stream_setup_for(rx)?;
     stream.play()?;
 
     loop {
+        // TODO:
         std::thread::sleep(std::time::Duration::from_millis(4000));
     }
 
@@ -109,20 +143,13 @@ where
     let mut synth = Synth::new(config.sample_rate.0 as f32);
     let err_fn = |err| eprintln!("Error building output sound stream: {}", err);
 
-    let time_at_start = std::time::Instant::now();
-    println!("Time at start: {:?}", time_at_start);
-
     let stream = device.build_output_stream(
         config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
             if let Ok(midi_event) = rx.try_recv() {
                 match midi_event {
-                    MidiEvent::NoteOn(note) => {
-                        synth.note_on(note);
-                    }
-                    MidiEvent::NoteOff(note) => {
-                        synth.note_off(note);
-                    }
+                    MidiEvent::NoteOn(note) => synth.note_on(note),
+                    MidiEvent::NoteOff(note) => synth.note_off(note),
                 }
             }
             process_frame(output, &mut synth, num_channels)
