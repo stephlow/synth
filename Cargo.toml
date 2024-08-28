@@ -1,11 +1,11 @@
 [package]
 name = "synth"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Stephan Lagerwaard <stephanlagerwaard@gmail.com>"]
 edition = "2021"
 
 [dependencies]
-coremidi = "0.7.0"
-cpal = "0.10.0"
-failure = "0.1.8"
-wmidi = "4.0.6"
+anyhow = "1.0.86"
+coremidi = "0.8.0"
+cpal = "0.15.3"
+wmidi = "4.0.10"
