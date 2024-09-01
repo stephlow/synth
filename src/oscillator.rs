@@ -1,16 +1,13 @@
-use crate::{adsr::Adsr, node::Node};
+use crate::node::Node;
 
-#[derive(Debug)]
 pub struct Oscillator {
     sample_rate: f32,
     waveform: Waveform,
     current_sample_index: f32,
     frequency_hz: f32,
     gain: f32,
-    adsr: Adsr,
 }
 
-#[derive(Debug)]
 pub enum Waveform {
     Sine,
     Square,
@@ -26,18 +23,16 @@ impl Oscillator {
             current_sample_index: 0.0,
             frequency_hz: 440.0,
             gain: 0.0,
-            adsr: Adsr::new(sample_rate, 1.1, 0.1, 0.7, 2.1),
         }
     }
 
     pub fn note_on(&mut self, freq: f32, gain: f32) {
         self.frequency_hz = freq;
         self.gain = gain;
-        self.adsr.note_on();
     }
 
     pub fn note_off(&mut self) {
-        self.adsr.note_off();
+        self.gain = 0.;
     }
 
     pub fn set_frequency(&mut self, frequency_hz: f32) {
@@ -100,6 +95,6 @@ impl Node for Oscillator {
             Waveform::Triangle => self.triangle_wave(),
         };
 
-        wave * self.gain * self.adsr.tick()
+        wave * self.gain
     }
 }

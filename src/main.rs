@@ -13,6 +13,7 @@ mod midi;
 mod node;
 mod oscillator;
 mod synth;
+mod voice;
 
 pub enum AppMessage {
     MidiMessage(MidiMessage),
