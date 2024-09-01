@@ -1,6 +1,6 @@
 use wmidi::{Note, Velocity};
 
-use crate::oscillator::Oscillator;
+use crate::oscillator::{Oscillator, Waveform};
 
 #[derive(Debug)]
 pub struct Synth {
@@ -12,10 +12,10 @@ impl Synth {
     pub fn new(sample_rate: f32) -> Self {
         Self {
             oscillators: [
-                Oscillator::new(sample_rate),
-                Oscillator::new(sample_rate),
-                Oscillator::new(sample_rate),
-                Oscillator::new(sample_rate),
+                Oscillator::new(sample_rate, Waveform::Saw),
+                Oscillator::new(sample_rate, Waveform::Square),
+                Oscillator::new(sample_rate, Waveform::Triangle),
+                Oscillator::new(sample_rate, Waveform::Sine),
             ],
             voices: [None, None, None, None],
         }

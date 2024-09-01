@@ -10,6 +10,7 @@ use std::sync::mpsc::{self, Receiver};
 use synth::Synth;
 use wmidi::{MidiMessage, Note, Velocity};
 
+mod adsr;
 mod oscillator;
 mod synth;
 

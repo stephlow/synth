@@ -1,11 +1,13 @@
+use crate::adsr::ADSR;
+
 #[derive(Debug)]
 pub struct Oscillator {
     pub sample_rate: f32,
     pub waveform: Waveform,
     pub current_sample_index: f32,
     pub frequency_hz: f32,
-    pub gate: Gate,
     pub gain: f32,
+    pub adsr: ADSR,
 }
 
 #[derive(Debug)]
@@ -23,25 +25,25 @@ pub enum Gate {
 }
 
 impl Oscillator {
-    pub fn new(sample_rate: f32) -> Self {
+    pub fn new(sample_rate: f32, waveform: Waveform) -> Self {
         Self {
-            waveform: Waveform::Sine,
+            waveform,
             sample_rate,
             current_sample_index: 0.0,
             frequency_hz: 440.0,
-            gate: Gate::Low,
             gain: 0.0,
+            adsr: ADSR::new(sample_rate, 1.1, 0.1, 0.7, 2.1),
         }
     }
 
     pub fn note_on(&mut self, freq: f32, gain: f32) {
         self.frequency_hz = freq;
         self.gain = gain;
-        self.gate = Gate::High;
+        self.adsr.note_on();
     }
 
     pub fn note_off(&mut self) {
-        self.gate = Gate::Low;
+        self.adsr.note_off();
     }
 
     pub fn set_frequency(&mut self, frequency_hz: f32) {
@@ -95,16 +97,13 @@ impl Oscillator {
     }
 
     pub fn tick(&mut self) -> f32 {
-        let wave = match self.gate {
-            Gate::High => match self.waveform {
-                Waveform::Sine => self.sine_wave(),
-                Waveform::Square => self.square_wave(),
-                Waveform::Saw => self.saw_wave(),
-                Waveform::Triangle => self.triangle_wave(),
-            },
-            Gate::Low => 0.,
+        let wave = match self.waveform {
+            Waveform::Sine => self.sine_wave(),
+            Waveform::Square => self.square_wave(),
+            Waveform::Saw => self.saw_wave(),
+            Waveform::Triangle => self.triangle_wave(),
         };
 
-        wave * self.gain
+        wave * self.gain * self.adsr.tick()
     }
 }
