@@ -1,4 +1,4 @@
-use crate::adsr::ADSR;
+use crate::{adsr::Adsr, node::Node};
 
 #[derive(Debug)]
 pub struct Oscillator {
@@ -7,7 +7,7 @@ pub struct Oscillator {
     pub current_sample_index: f32,
     pub frequency_hz: f32,
     pub gain: f32,
-    pub adsr: ADSR,
+    pub adsr: Adsr,
 }
 
 #[derive(Debug)]
@@ -18,12 +18,6 @@ pub enum Waveform {
     Triangle,
 }
 
-#[derive(Debug)]
-pub enum Gate {
-    High,
-    Low,
-}
-
 impl Oscillator {
     pub fn new(sample_rate: f32, waveform: Waveform) -> Self {
         Self {
@@ -32,7 +26,7 @@ impl Oscillator {
             current_sample_index: 0.0,
             frequency_hz: 440.0,
             gain: 0.0,
-            adsr: ADSR::new(sample_rate, 1.1, 0.1, 0.7, 2.1),
+            adsr: Adsr::new(sample_rate, 1.1, 0.1, 0.7, 2.1),
         }
     }
 
@@ -95,8 +89,10 @@ impl Oscillator {
     fn triangle_wave(&mut self) -> f32 {
         self.generative_waveform(2, 2.0)
     }
+}
 
-    pub fn tick(&mut self) -> f32 {
+impl Node for Oscillator {
+    fn tick(&mut self) -> f32 {
         let wave = match self.waveform {
             Waveform::Sine => self.sine_wave(),
             Waveform::Square => self.square_wave(),

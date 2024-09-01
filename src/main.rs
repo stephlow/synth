@@ -11,6 +11,7 @@ use synth::Synth;
 use wmidi::{MidiMessage, Note, Velocity};
 
 mod adsr;
+mod node;
 mod oscillator;
 mod synth;
 

@@ -1,6 +1,9 @@
 use wmidi::{Note, Velocity};
 
-use crate::oscillator::{Oscillator, Waveform};
+use crate::{
+    node::Node,
+    oscillator::{Oscillator, Waveform},
+};
 
 #[derive(Debug)]
 pub struct Synth {
