@@ -2,12 +2,12 @@ use crate::{adsr::Adsr, node::Node};
 
 #[derive(Debug)]
 pub struct Oscillator {
-    pub sample_rate: f32,
-    pub waveform: Waveform,
-    pub current_sample_index: f32,
-    pub frequency_hz: f32,
-    pub gain: f32,
-    pub adsr: Adsr,
+    sample_rate: f32,
+    waveform: Waveform,
+    current_sample_index: f32,
+    frequency_hz: f32,
+    gain: f32,
+    adsr: Adsr,
 }
 
 #[derive(Debug)]
