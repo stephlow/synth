@@ -3,7 +3,7 @@ use cpal::{
     SizedSample,
 };
 use cpal::{FromSample, Sample};
-use midi::{setup_midi, MidiEvent};
+use midi::{setup_midi, MidiMessage};
 use std::error::Error;
 use std::sync::mpsc::{self, Receiver};
 use synth::Synth;
@@ -14,8 +14,12 @@ mod node;
 mod oscillator;
 mod synth;
 
+pub enum AppMessage {
+    MidiMessage(MidiMessage),
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
-    let (tx, rx) = mpsc::channel::<MidiEvent>();
+    let (tx, rx) = mpsc::channel::<AppMessage>();
 
     // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
     let _conn_in = setup_midi(tx)?;
@@ -31,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-pub fn stream_setup_for(rx: Receiver<MidiEvent>) -> Result<cpal::Stream, anyhow::Error>
+pub fn stream_setup_for(rx: Receiver<AppMessage>) -> Result<cpal::Stream, anyhow::Error>
 where
 {
     let (_host, device, config) = host_device_setup()?;
@@ -71,7 +75,7 @@ pub fn host_device_setup(
 pub fn make_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    rx: Receiver<MidiEvent>,
+    rx: Receiver<AppMessage>,
 ) -> Result<cpal::Stream, anyhow::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -83,10 +87,12 @@ where
     let stream = device.build_output_stream(
         config,
         move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
-            if let Ok(midi_event) = rx.try_recv() {
-                match midi_event {
-                    MidiEvent::NoteOn(note, velocity) => synth.note_on(note, velocity),
-                    MidiEvent::NoteOff(note, velocity) => synth.note_off(note, velocity),
+            if let Ok(app_message) = rx.try_recv() {
+                match app_message {
+                    AppMessage::MidiMessage(midi_message) => match midi_message {
+                        MidiMessage::NoteOn(note, velocity) => synth.note_on(note, velocity),
+                        MidiMessage::NoteOff(note, velocity) => synth.note_off(note, velocity),
+                    },
                 }
             }
             process_frame(output, &mut synth, num_channels)

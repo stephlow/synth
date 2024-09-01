@@ -1,19 +1,24 @@
+use crate::AppMessage;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use std::sync::mpsc;
-use wmidi::{MidiMessage, Note, Velocity};
+use wmidi::{Note, Velocity};
 
-pub enum MidiEvent {
+pub enum MidiMessage {
     NoteOn(Note, Velocity),
     NoteOff(Note, Velocity),
 }
 
-fn handle_midi_message(bytes: &[u8]) -> Option<MidiEvent> {
-    if let Ok(message) = MidiMessage::try_from(bytes) {
+fn handle_midi_message(bytes: &[u8]) -> Option<MidiMessage> {
+    if let Ok(message) = wmidi::MidiMessage::try_from(bytes) {
         match message {
-            MidiMessage::NoteOn(_, note, velocity) => Some(MidiEvent::NoteOn(note, velocity)),
-            MidiMessage::NoteOff(_, note, velocity) => Some(MidiEvent::NoteOff(note, velocity)),
+            wmidi::MidiMessage::NoteOn(_, note, velocity) => {
+                Some(MidiMessage::NoteOn(note, velocity))
+            }
+            wmidi::MidiMessage::NoteOff(_, note, velocity) => {
+                Some(MidiMessage::NoteOff(note, velocity))
+            }
             _ => None,
         }
     } else {
@@ -21,7 +26,7 @@ fn handle_midi_message(bytes: &[u8]) -> Option<MidiEvent> {
     }
 }
 
-pub fn setup_midi(tx: mpsc::Sender<MidiEvent>) -> Result<MidiInputConnection<()>, Box<dyn Error>> {
+pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()>, Box<dyn Error>> {
     let mut midi_in = MidiInput::new("midir reading input")?;
     midi_in.ignore(Ignore::None);
 
@@ -59,8 +64,8 @@ pub fn setup_midi(tx: mpsc::Sender<MidiEvent>) -> Result<MidiInputConnection<()>
         in_port,
         "midir-read-input",
         move |_, bytes, _| {
-            if let Some(message) = handle_midi_message(bytes) {
-                tx.send(message).unwrap();
+            if let Some(midi_message) = handle_midi_message(bytes) {
+                tx.send(AppMessage::MidiMessage(midi_message)).unwrap();
             }
         },
         (),
