@@ -17,6 +17,7 @@ mod model;
 mod param_fmt;
 mod place;
 mod scale_ui;
+mod settings;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use crossterm::terminal::{

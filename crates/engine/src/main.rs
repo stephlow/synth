@@ -71,6 +71,10 @@ pub enum PatchOp {
         dst_port: u32,
     },
     LoadDocument { json: String },
+    /// Replace document with `Patch::default()` and rebuild.
+    NewDefault,
+    /// Point main audio bus at a module output (rebuilds voices).
+    SetOutputTap { module: u32, port: usize },
     /// Snapshot only (no rebuild); still takes exclusive access briefly.
     GetSnapshot,
     /// Control-surface lattice coordinates for one module.
@@ -361,6 +365,18 @@ impl IoRuntime {
                 PatchOp::LoadDocument { json } => {
                     let patch = dsp::Patch::from_json(&json).map_err(|e| e.to_string())?;
                     inner.synth.load_patch(patch).map_err(|e| e.to_string())?;
+                }
+                PatchOp::NewDefault => {
+                    inner
+                        .synth
+                        .load_patch(dsp::Patch::default())
+                        .map_err(|e| e.to_string())?;
+                }
+                PatchOp::SetOutputTap { module, port } => {
+                    inner
+                        .synth
+                        .set_output_tap(module, port)
+                        .map_err(|e| e.to_string())?;
                 }
                 PatchOp::GetSnapshot => {}
                 PatchOp::SetModuleCoordinates { id, x, y } => {

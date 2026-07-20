@@ -9,7 +9,7 @@ use crate::app::App;
 use crate::draw::assemble::{tile_paints, wire_views};
 use crate::draw::lattice::{draw_lattice, LatticePaint};
 use crate::draw::layout::{chrome_heights, Geom};
-use crate::draw::menu::{draw_menu, draw_param_edit};
+use crate::draw::menu::{draw_menu, draw_param_edit, draw_path_edit};
 use crate::draw::status::draw_status;
 use crate::draw::style::{
     banner_right, banner_rule, banner_title, canvas_bg,
@@ -37,8 +37,10 @@ pub fn draw_screen(frame: &mut Frame, app: &App) {
 
     let tiles = tile_paints(app);
     let wires = wire_views(app);
-    let dimmed =
-        (!app.menu_stack.is_empty() || app.param_edit.is_some()) && app.moving.is_none();
+    let dimmed = (!app.menu_stack.is_empty()
+        || app.param_edit.is_some()
+        || app.path_edit.is_some())
+        && app.moving.is_none();
 
     draw_lattice(
         frame,
@@ -56,7 +58,9 @@ pub fn draw_screen(frame: &mut Frame, app: &App) {
         },
     );
 
-    if let Some(ci) = app.param_edit {
+    if let Some(pe) = &app.path_edit {
+        draw_path_edit(frame, canvas, pe.title(), pe.path());
+    } else if let Some(ci) = app.param_edit {
         if let Some(c) = app.controls.get(ci) {
             let v = app.values.get(ci).copied().unwrap_or(0.0);
             let shown = app.format_param(ci);

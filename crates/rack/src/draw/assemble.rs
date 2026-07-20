@@ -20,31 +20,32 @@ pub fn tile_paints(app: &App) -> Vec<TilePaint> {
         } || moving_idx == Some(i);
 
         let glyph = match &m.id {
-            ModuleId::Scope => GlyphKind::Scope,
-            ModuleId::Meter => GlyphKind::Meter,
-            ModuleId::Keyboard => GlyphKind::Keyboard,
             ModuleId::Io(_) => GlyphKind::Io,
             _ => GlyphKind::from_module_kind(&m.kind),
         };
 
-        // Live waveform for this module when the engine publishes samples.
+        // Live waveform from engine module_signals (patch modules only).
+        // Oscilloscope modules also fall back to master mix when they are the bus tap.
         let live_wave = match &m.id {
-            ModuleId::Voice(id) => app
-                .module_waveform(*id)
-                .map(|w| w.to_vec())
-                .filter(|w| w.iter().any(|s| s.abs() > 1e-5)),
-            ModuleId::Scope => {
-                if app.scope.is_empty() {
-                    None
-                } else {
+            ModuleId::Voice(id) => {
+                let from_mod = app
+                    .module_waveform(*id)
+                    .map(|w| w.to_vec())
+                    .filter(|w| w.iter().any(|s| s.abs() > 1e-5));
+                if from_mod.is_some() {
+                    from_mod
+                } else if m.kind == "oscilloscope"
+                    && app.roles.output_tap_module == *id
+                    && !app.scope.is_empty()
+                {
                     Some(app.scope.clone())
+                } else {
+                    None
                 }
             }
-            _ => None,
+            ModuleId::Io(_) => None,
         };
-        let use_live = live_wave.is_some()
-            || matches!(m.id, ModuleId::Scope)
-            || matches!(glyph, GlyphKind::Scope);
+        let use_live = live_wave.is_some() || matches!(glyph, GlyphKind::Scope);
 
         out.push(TilePaint {
             pos,

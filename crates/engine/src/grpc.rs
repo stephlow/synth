@@ -22,7 +22,7 @@ use synth_proto::{
     ModuleType, ModuleTypeList, NoteOffRequest, NoteOnRequest, ParamTypeDescriptor,
     PatchCanvas as ProtoPatchCanvas, PatchRolesDescriptor, PatchSnapshot, PortDescriptor,
     RemoveModuleRequest, SavePatchResponse, SetCoordinatesRequest, SetIoDeviceRequest,
-    SetModuleCoordinatesRequest, SetParamRequest,
+    SetModuleCoordinatesRequest, SetOutputTapRequest, SetParamRequest,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -560,6 +560,28 @@ impl SynthRpc for SynthService {
         Ok(Response::new(SavePatchResponse {
             document_json: snap.document_json,
         }))
+    }
+
+    async fn new_patch(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        debug!("new_patch (default)");
+        let snap = self.apply_op(PatchOp::NewDefault)?;
+        Ok(Response::new(snap))
+    }
+
+    async fn set_output_tap(
+        &self,
+        request: Request<SetOutputTapRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let req = request.into_inner();
+        debug!(module = req.module, port = req.port, "set_output_tap");
+        let snap = self.apply_op(PatchOp::SetOutputTap {
+            module: req.module,
+            port: req.port as usize,
+        })?;
+        Ok(Response::new(snap))
     }
 
     async fn set_module_coordinates(

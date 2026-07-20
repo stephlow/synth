@@ -4,16 +4,18 @@ use std::collections::{HashMap, HashSet};
 
 use synth_proto::{
     AudioDevice, CableDescriptor, CableSignal, ControlDescriptor, IoChannelMeter,
-    IoEndpointDescriptor, ModuleInstanceDescriptor, ModuleSignal, ModuleType, PatchSnapshot,
+    IoEndpointDescriptor, ModuleInstanceDescriptor, ModuleSignal, ModuleType, PatchRolesDescriptor,
+    PatchSnapshot,
 };
 
 use crate::build::{self, build_ui_modules};
 use crate::model::{
-    kind_abbrev, BuildInput, Item, LatticePos, MenuState, ModuleId, MoveState, PendingCable,
-    PlaceKey, UiModule, HINTS,
+    kind_abbrev, BuildInput, Item, LatticePos, MenuState, ModuleId, MoveState, PathEdit,
+    PendingCable, PlaceKey, UiModule, HINTS,
 };
 use crate::draw::style::ThemeId;
 use crate::place::{self, first_free_near, lattice_bounds, layout_modules, module_at, place_key};
+use crate::settings::{self, UserSettings};
 
 pub struct App {
     pub controls: Vec<ControlDescriptor>,
@@ -23,6 +25,8 @@ pub struct App {
     pub cables: Vec<CableDescriptor>,
     pub module_types: Vec<ModuleType>,
     pub io_endpoints: Vec<IoEndpointDescriptor>,
+    /// Main-bus / role modules from the last patch snapshot.
+    pub roles: PatchRolesDescriptor,
     pub audio_devices: Vec<AudioDevice>,
     pub io_meters: Vec<IoChannelMeter>,
     pub scope: Vec<f32>,
@@ -33,7 +37,7 @@ pub struct App {
     /// Live per-cable peak (cable id → peak).
     pub cable_signals: HashMap<u32, f32>,
     pub pending: Option<PendingCable>,
-    pub held_notes: HashSet<u8>,
+
     pub status: String,
     pub quit: bool,
     pub state_stream_ended: bool,
@@ -60,6 +64,10 @@ pub struct App {
     pub param_edit: Option<usize>,
     /// When set, module is being dragged on the lattice.
     pub moving: Option<MoveState>,
+    /// When set, path entry overlay for save/load.
+    pub path_edit: Option<PathEdit>,
+    /// Last successful save/load path (pre-fills the path editor).
+    pub last_patch_path: String,
 
     pub term_width: u16,
     pub term_height: u16,
@@ -68,6 +76,9 @@ pub struct App {
     pub theme_id: ThemeId,
     /// Live preview while Theme… menu is open (None = use `theme_id`).
     pub theme_preview: Option<ThemeId>,
+
+    /// User settings (theme + last path); persisted via `directories`.
+    settings: UserSettings,
 }
 
 impl App {
@@ -76,6 +87,9 @@ impl App {
         audio_devices: Vec<AudioDevice>,
         snap: PatchSnapshot,
     ) -> Self {
+        let user = settings::load();
+        let theme_id = user.theme_id();
+        let last_patch_path = user.last_path_or_default();
         let mut app = Self {
             controls: Vec::new(),
             values: Vec::new(),
@@ -84,6 +98,7 @@ impl App {
             cables: Vec::new(),
             module_types,
             io_endpoints: Vec::new(),
+            roles: PatchRolesDescriptor::default(),
             audio_devices,
             io_meters: Vec::new(),
             scope: Vec::new(),
@@ -92,7 +107,7 @@ impl App {
             module_signals: HashMap::new(),
             cable_signals: HashMap::new(),
             pending: None,
-            held_notes: HashSet::new(),
+
             status: HINTS[0].into(),
             quit: false,
             state_stream_ended: false,
@@ -107,13 +122,43 @@ impl App {
             menu_stack: Vec::new(),
             param_edit: None,
             moving: None,
+            path_edit: None,
+            last_patch_path,
             term_width: 80,
             term_height: 24,
-            theme_id: ThemeId::Nocturne,
+            theme_id,
             theme_preview: None,
+            settings: user,
         };
         app.apply_snapshot(snap);
         app
+    }
+
+    pub fn persist_settings(&mut self) {
+        self.settings.set_theme_id(self.theme_id);
+        self.settings.last_patch_path = Some(self.last_patch_path.clone());
+        settings::save(&self.settings);
+    }
+
+    pub fn begin_save_path(&mut self) {
+        self.clear_menus();
+        self.path_edit = Some(PathEdit::Save {
+            path: self.last_patch_path.clone(),
+        });
+        self.refresh_status();
+    }
+
+    pub fn begin_load_path(&mut self) {
+        self.clear_menus();
+        self.path_edit = Some(PathEdit::Load {
+            path: self.last_patch_path.clone(),
+        });
+        self.refresh_status();
+    }
+
+    pub fn cancel_path_edit(&mut self) {
+        self.path_edit = None;
+        self.refresh_status();
     }
 
     /// Theme used for drawing (preview if browsing Theme…, else committed).
@@ -124,6 +169,7 @@ impl App {
     pub fn set_theme(&mut self, id: ThemeId) {
         self.theme_id = id;
         self.theme_preview = None;
+        self.persist_settings();
         self.status = format!("theme → {}", id.label());
     }
 
@@ -173,6 +219,7 @@ impl App {
         self.voice_modules = snap.modules;
         self.cables = snap.cables;
         self.io_endpoints = snap.io_endpoints;
+        self.roles = snap.roles.unwrap_or_default();
         self.patch_canvas = snap.canvas.as_ref().map(|c| {
             (
                 c.width.min(u32::from(u16::MAX)) as u16,
@@ -674,7 +721,7 @@ impl App {
         };
         match &m.id {
             ModuleId::Voice(id) => self.module_has_cables(*id),
-            ModuleId::Keyboard | ModuleId::Scope | ModuleId::Meter | ModuleId::Io(_) => true,
+            ModuleId::Io(_) => true,
         }
     }
 
@@ -733,7 +780,7 @@ impl App {
         let Some(m) = self.modules.get(module_idx) else {
             return 0.0;
         };
-        let notes_hot = self.active_voices > 0 || !self.held_notes.is_empty();
+        let voices_hot = self.active_voices > 0;
         match &m.id {
             ModuleId::Voice(id) => {
                 // Live peak from engine; scale aggressively so quiet CV still
@@ -747,30 +794,13 @@ impl App {
                 };
                 if live > 0.0 {
                     live
-                } else if notes_hot && self.module_has_cables(*id) {
+                } else if voices_hot && self.module_has_cables(*id) {
                     // Fallback if stream hasn't delivered module_signals yet.
                     0.75
                 } else if self.module_has_cables(*id) {
                     0.18
                 } else {
                     0.08
-                }
-            }
-            ModuleId::Keyboard => {
-                if self.held_notes.is_empty() {
-                    0.12
-                } else {
-                    0.95
-                }
-            }
-            ModuleId::Scope | ModuleId::Meter => {
-                let p = self.output_peak.clamp(0.0, 1.0);
-                if p > 0.001 {
-                    p.sqrt().clamp(0.2, 1.0)
-                } else if notes_hot {
-                    0.5
-                } else {
-                    0.1
                 }
             }
             ModuleId::Io(epid) => {
@@ -814,6 +844,33 @@ impl App {
             Some(ModuleId::Voice(id)) => Some(*id),
             _ => None,
         }
+    }
+
+    /// Master Audio Out endpoint (hardware L/R + CV), not a voice-graph module.
+    pub fn is_master_audio_out(&self, module_idx: usize) -> bool {
+        use crate::model::ENDPOINT_AUDIO_OUT;
+        match self.modules.get(module_idx).map(|m| &m.id) {
+            Some(ModuleId::Io(epid)) => {
+                epid == ENDPOINT_AUDIO_OUT
+                    || self
+                        .io_endpoints
+                        .iter()
+                        .find(|e| e.id == *epid)
+                        .is_some_and(|e| e.direction == "output")
+            }
+            _ => false,
+        }
+    }
+
+    /// Human label for the current main-bus tap (`roles.output_tap_*`).
+    pub fn main_bus_source_label(&self) -> String {
+        let m = self.roles.output_tap_module;
+        let p = self.roles.output_tap_port;
+        format!(
+            "{}.{}",
+            self.module_short(m),
+            self.port_name(m, p, true)
+        )
     }
 
     pub fn next_device_for(&self, endpoint_id: &str) -> Option<String> {
@@ -932,6 +989,14 @@ impl App {
     }
 
     pub fn refresh_status(&mut self) {
+        if let Some(pe) = &self.path_edit {
+            self.status = format!(
+                "{}  ·  type path  ·  Enter confirm  ·  Esc cancel",
+                pe.title()
+            );
+            return;
+        }
+
         if let Some(ci) = self.param_edit {
             if let Some(c) = self.controls.get(ci) {
                 let shown = self.format_param(ci);
@@ -984,7 +1049,7 @@ impl App {
 
         let action = if let Some(p) = self.pending {
             format!(
-                "ARMED {}.{} → Enter on module → Inputs…",
+                "ARMED {}.{} → Enter on destination module",
                 self.module_short(p.src_module),
                 self.port_name(p.src_module, p.src_port, true)
             )

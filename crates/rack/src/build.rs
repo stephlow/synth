@@ -2,11 +2,11 @@
 
 use synth_proto::{CableDescriptor, ModuleInstanceDescriptor, ModuleType};
 
-use crate::model::{
-    BuildInput, Item, ModuleId, UiModule, MASTER_IO_MODULE, NOTE_KEYS,
-};
+use crate::model::{BuildInput, Item, ModuleId, UiModule, MASTER_IO_MODULE};
 
-/// Build lattice module list (voice → IO → utilities). Add lives on empty cells.
+/// Build lattice tiles **only** from the patch snapshot:
+/// voice modules (`patch.modules`) + hardware endpoints (`patch.io_endpoints`).
+/// Never invent Scope/Meter/Keys or other furniture.
 pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
     let mut ui = Vec::new();
 
@@ -20,7 +20,21 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
             }
         }
 
-        if let Some(t) = type_info {
+        if vm.kind == "io" {
+            // Ports depend on instance channel layout, not static registry.
+            // Send = graph inputs, capture = graph outputs (after send mirrors).
+            // Empty default: send=0, capture=2 → ch0/ch1 outs only.
+            // We don't have send/capture on ModuleInstanceDescriptor from proto —
+            // use type_info outs as fallback (ch0, ch1).
+            if let Some(t) = type_info {
+                for p in &t.outputs {
+                    items.push(Item::Output {
+                        port: p.index,
+                        name: p.name.clone(),
+                    });
+                }
+            }
+        } else if let Some(t) = type_info {
             for p in &t.inputs {
                 items.push(Item::Input {
                     port: p.index,
@@ -43,7 +57,19 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
         });
     }
 
+    // Hardware endpoints from the patch document only. Skip an input endpoint
+    // when a voice `io` module already represents it (avoids double Audio In).
     for ep in input.io_endpoints {
+        if ep.direction == "input" {
+            let has_voice = input
+                .voice_modules
+                .iter()
+                .any(|m| m.kind == "io" && m.name == ep.name);
+            if has_voice {
+                continue;
+            }
+        }
+
         let mut items = Vec::new();
         let param_module = if ep.direction == "output" {
             Some(MASTER_IO_MODULE)
@@ -55,10 +81,10 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
                 .map(|m| m.id)
                 .or_else(|| {
                     input
-                        .controls
+                        .voice_modules
                         .iter()
-                        .find(|c| c.module_name == ep.name)
-                        .map(|c| c.module)
+                        .find(|m| m.kind == "io")
+                        .map(|m| m.id)
                 })
         };
         if let Some(mid) = param_module {
@@ -68,6 +94,21 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
                 }
             }
         }
+        // Master Audio Out: main bus assign (SetOutputTap) — dual mono L/R.
+        if ep.direction == "output" {
+            items.push(Item::Input {
+                port: 0,
+                name: "Audio L/R".into(),
+            });
+        }
+        if ep.direction == "input" {
+            for ch in 0..ep.channels.max(1) {
+                items.push(Item::Output {
+                    port: ch,
+                    name: format!("ch{ch}"),
+                });
+            }
+        }
         ui.push(UiModule {
             id: ModuleId::Io(ep.id.clone()),
             title: ep.name.clone(),
@@ -75,30 +116,6 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
             items,
         });
     }
-
-    ui.push(UiModule {
-        id: ModuleId::Scope,
-        title: "Scope".into(),
-        kind: "scope".into(),
-        items: vec![Item::Display],
-    });
-    ui.push(UiModule {
-        id: ModuleId::Meter,
-        title: "Meter".into(),
-        kind: "meter".into(),
-        items: vec![Item::Display],
-    });
-
-    let mut key_items = Vec::new();
-    for &(ch, midi) in NOTE_KEYS {
-        key_items.push(Item::Note { midi, label: ch });
-    }
-    ui.push(UiModule {
-        id: ModuleId::Keyboard,
-        title: "Keyboard".into(),
-        kind: "keyboard".into(),
-        items: key_items,
-    });
 
     ui
 }

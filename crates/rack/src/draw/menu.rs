@@ -104,6 +104,40 @@ pub fn draw_menu(frame: &mut Frame, canvas: Rect, menu: &MenuState) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+pub fn draw_path_edit(frame: &mut Frame, canvas: Rect, title: &str, path: &str) {
+    let lines_n = 5u16;
+    let cols = canvas
+        .width
+        .saturating_sub(2)
+        .min(56)
+        .max(28);
+    let area = menu_rect(canvas, lines_n, cols);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Block::default().style(menu_clear()), area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(menu_border())
+        .style(menu_clear())
+        .title(Span::styled(format!(" {title} "), menu_title()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let path_line = format!("{path}█");
+    let body = vec![
+        Line::from(Span::styled("path / filename", menu_value())),
+        Line::from(Span::styled(
+            truncate(&path_line, inner.width as usize),
+            param_value(),
+        )),
+        Line::from(Span::styled(
+            "type path  ·  Enter ok  ·  Esc cancel",
+            menu_value(),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(body), inner);
+}
+
 pub fn draw_param_edit(
     frame: &mut Frame,
     canvas: Rect,

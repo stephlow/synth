@@ -60,4 +60,9 @@ impl Module for MidiToCv {
             _ => {}
         }
     }
+
+    /// Held notes keep the voice non-stealable while the gate is open.
+    fn is_active(&self) -> bool {
+        self.gate > 0.0
+    }
 }

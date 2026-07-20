@@ -21,7 +21,7 @@ pub fn layout_modules(modules: &[UiModule], pack_cols: u16) -> Vec<Option<Lattic
     for (i, m) in modules.iter().enumerate() {
         match &m.id {
             ModuleId::Voice(_) => voices.push(i),
-            ModuleId::Io(_) | ModuleId::Scope | ModuleId::Meter | ModuleId::Keyboard => {
+            ModuleId::Io(_) => {
                 utils.push(i);
             }
         }

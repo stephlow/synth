@@ -62,6 +62,7 @@ pub fn step_value(
     if is_unit_step_param(control) {
         return (value.round() + direction.signum()).clamp(control.min, control.max);
     }
-    let step = (control.max - control.min) * if fine { 0.002 } else { 0.02 };
+    // Coarse ≈ 20 steps across the full range; fine ≈ 100 steps.
+    let step = (control.max - control.min) * if fine { 0.01 } else { 0.05 };
     (value + direction * step).clamp(control.min, control.max)
 }

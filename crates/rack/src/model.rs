@@ -2,27 +2,50 @@
 
 use synth_proto::{ControlDescriptor, IoEndpointDescriptor, ModuleInstanceDescriptor, ModuleType};
 
-pub const NOTE_KEYS: &[(char, u8)] = &[
-    ('z', 60),
-    ('x', 62),
-    ('c', 64),
-    ('v', 65),
-    ('b', 67),
-    ('n', 69),
-    ('m', 71),
-];
-
 pub const DEFAULT_ENGINE_ADDR: &str = "http://127.0.0.1:50051";
 pub const DEFAULT_LOG_FILE: &str = "rack.log";
 pub const DEFAULT_PATCH_FILE: &str = "patch.json";
+/// Default directory hint for new save paths.
+pub const DEFAULT_PATCH_DIR: &str = "patches";
 /// Master IO calibration knobs use this module id (engine `MASTER_IO_MODULE`).
 pub const MASTER_IO_MODULE: u32 = u32::MAX;
+
+/// In-UI path entry for save / load (filename + optional directories).
+#[derive(Clone, Debug)]
+pub enum PathEdit {
+    Save { path: String },
+    Load { path: String },
+}
+
+impl PathEdit {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Save { path } | Self::Load { path } => path,
+        }
+    }
+
+    pub fn path_mut(&mut self) -> &mut String {
+        match self {
+            Self::Save { path } | Self::Load { path } => path,
+        }
+    }
+
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Save { .. } => "SAVE PATCH",
+            Self::Load { .. } => "LOAD PATCH",
+        }
+    }
+}
 
 pub const HINTS: &[&str] = &[
     "arrows move target  ·  Enter opens menu  ·  Esc back  ·  q quit",
     "all actions live in the menu  ·  Move… / params / patch / save from Enter",
-    "z–m play notes anytime  ·  connect: Outputs… then Inputs…",
+    "Outputs… arm jack → Enter on destination module",
 ];
+
+/// Patch endpoint id for master hardware output (matches `dsp::IO_ENDPOINT_AUDIO_OUT`).
+pub const ENDPOINT_AUDIO_OUT: &str = "audio_out";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LatticePos {
@@ -32,11 +55,10 @@ pub struct LatticePos {
 
 #[derive(Clone, Debug)]
 pub enum ModuleId {
+    /// Patch document module (stable engine id).
     Voice(u32),
+    /// Hardware IO endpoint from `patch.io_endpoints` (`audio_out` / `audio_in`).
     Io(String),
-    Scope,
-    Meter,
-    Keyboard,
 }
 
 /// Stable lattice identity across UI rebuilds (not list index).
@@ -44,9 +66,6 @@ pub enum ModuleId {
 pub enum PlaceKey {
     Voice(u32),
     Io(String),
-    Scope,
-    Meter,
-    Keyboard,
 }
 
 impl PlaceKey {
@@ -54,9 +73,6 @@ impl PlaceKey {
         match id {
             ModuleId::Voice(v) => PlaceKey::Voice(*v),
             ModuleId::Io(s) => PlaceKey::Io(s.clone()),
-            ModuleId::Scope => PlaceKey::Scope,
-            ModuleId::Meter => PlaceKey::Meter,
-            ModuleId::Keyboard => PlaceKey::Keyboard,
         }
     }
 }
@@ -74,8 +90,6 @@ pub enum Item {
     Param { control_index: usize },
     Input { port: u32, name: String },
     Output { port: u32, name: String },
-    Note { midi: u8, label: char },
-    Display,
 }
 
 #[derive(Clone, Debug)]
@@ -240,16 +254,22 @@ pub enum MenuAction {
     OpenDisconnect { module_idx: usize },
     OpenAddKinds,
     OpenDevices { endpoint_id: String },
-    OpenNotes { module_idx: usize },
     OpenInfo { module_idx: usize },
     /// Enter ParamEdit mode.
     EditParam { control_index: usize },
+    /// Arm source jack; navigate to a destination module (or Audio Out) and Enter.
     ArmOutput {
         module: u32,
         port: u32,
         name: String,
     },
     ConnectInput {
+        module: u32,
+        port: u32,
+        name: String,
+    },
+    /// Route a voice-module output to master Audio Out (L/R dual mono).
+    SetOutputTap {
         module: u32,
         port: u32,
         name: String,
@@ -270,10 +290,13 @@ pub enum MenuAction {
         endpoint_id: String,
         device_name: String,
     },
-    ToggleNote { midi: u8 },
     /// Pick up module and drag with arrows.
     StartMove { module_idx: usize },
+    /// Reset engine to the built-in default patch.
+    NewPatch,
+    /// Open path entry to save document JSON to disk.
     SavePatch,
+    /// Open path entry to load document JSON from disk.
     LoadPatch,
     /// Open Theme… preset list.
     OpenThemes,

@@ -134,6 +134,129 @@ pub struct PatchCanvas {
     pub height: u32,
 }
 
+/// Standard Audio Out (master) + Audio In (voice Io) endpoint bindings.
+fn standard_io_endpoints(
+    io_in_module: u32,
+    audio_in_coords: ModuleCoordinates,
+    audio_out_coords: ModuleCoordinates,
+) -> Vec<IoEndpoint> {
+    let audio_in_params = vec![
+        ParamInfo {
+            name: "Ch1 Scale".into(),
+            param: Io::param_capture_scale(0),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Ch1 Offset".into(),
+            param: Io::param_capture_offset(0),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+        ParamInfo {
+            name: "Ch2 Scale".into(),
+            param: Io::param_capture_scale(1),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Ch2 Offset".into(),
+            param: Io::param_capture_offset(1),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+    ];
+    // Master Io: L, R, pitch CV, gate CV.
+    let audio_out_params = vec![
+        ParamInfo {
+            name: "Audio L Scale".into(),
+            param: Io::param_send_scale(0),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Audio L Offset".into(),
+            param: Io::param_send_offset(0),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+        ParamInfo {
+            name: "Audio R Scale".into(),
+            param: Io::param_send_scale(1),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Audio R Offset".into(),
+            param: Io::param_send_offset(1),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+        ParamInfo {
+            name: "Pitch Scale".into(),
+            param: Io::param_send_scale(2),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Pitch Offset".into(),
+            param: Io::param_send_offset(2),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+        ParamInfo {
+            name: "Gate Scale".into(),
+            param: Io::param_send_scale(3),
+            min: 0.0,
+            max: 2.0,
+            default_value: 1.0,
+        },
+        ParamInfo {
+            name: "Gate Offset".into(),
+            param: Io::param_send_offset(3),
+            min: -1.0,
+            max: 1.0,
+            default_value: 0.0,
+        },
+    ];
+    vec![
+        IoEndpoint {
+            id: IO_ENDPOINT_AUDIO_OUT.into(),
+            name: "Audio Out".into(),
+            kind: "io".into(),
+            direction: IoDirection::Output,
+            channels: 4,
+            device: IO_DEVICE_DEFAULT.into(),
+            device_channel_offset: 0,
+            module: None,
+            params: audio_out_params,
+            coordinates: audio_out_coords,
+        },
+        IoEndpoint {
+            id: IO_ENDPOINT_AUDIO_IN.into(),
+            name: "Audio In".into(),
+            kind: "io".into(),
+            direction: IoDirection::Input,
+            channels: 2,
+            device: IO_DEVICE_DEFAULT.into(),
+            device_channel_offset: 0,
+            module: Some(io_in_module),
+            params: audio_in_params,
+            coordinates: audio_in_coords,
+        },
+    ]
+}
+
 /// One module placed in the patch document.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModuleInstance {
@@ -292,12 +415,85 @@ impl BuiltPatch {
 }
 
 impl Default for Patch {
-    /// Multi-part default: free-running sequenced bass + kick + snare, and a
-    /// MIDI/keyboard lead. Voices are averaged in the synth, so free-running
-    /// layers stay at natural level; the lead is mixed hotter so poly notes
-    /// cut through after `/ NUM_VOICES`.
+    /// Empty starter — see [`Patch::empty`].
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl Patch {
+    /// Minimal document: voice **Audio In** Io + master **Audio Out**, plus the
+    /// one non-IO role the engine still needs for MIDI (`midi_to_cv`).
     ///
-    /// Lattice (signal flow mostly left → right within each row):
+    /// - `external_input` / output tap → the Io (capture ch0 is the voice bus;
+    ///   silence until something is captured or you patch into the graph).
+    /// - `note_source` / `activity_gate` → same MidiToCv (gate drives `is_active`).
+    ///
+    /// No cables. Lattice shows In + Out endpoints and the MIDI module.
+    pub fn empty() -> Self {
+        let mut next_id = 0u32;
+        let mut alloc = || {
+            let id = next_id;
+            next_id += 1;
+            id
+        };
+        let at = ModuleCoordinates::new;
+
+        let midi_to_cv = alloc();
+        let io_in = alloc();
+
+        let modules = vec![
+            ModuleInstance {
+                id: midi_to_cv,
+                kind: "midi_to_cv".into(),
+                name: "MIDI to CV".into(),
+                params: vec![],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(0, 0),
+            },
+            ModuleInstance {
+                id: io_in,
+                kind: "io".into(),
+                name: "Audio In".into(),
+                params: vec![
+                    (Io::param_capture_scale(0), 1.0),
+                    (Io::param_capture_offset(0), 0.0),
+                    (Io::param_capture_scale(1), 1.0),
+                    (Io::param_capture_offset(1), 0.0),
+                ],
+                io_send_channels: Some(0),
+                io_capture_channels: Some(2),
+                coordinates: at(0, 1),
+            },
+        ];
+
+        Self {
+            next_id,
+            next_cable_id: 0,
+            modules,
+            cables: vec![],
+            roles: PatchRoles {
+                note_source: midi_to_cv,
+                activity_gate: midi_to_cv,
+                external_input: io_in,
+                // Tap capture ch0: master audio is whatever is written into Io
+                // (silence by default). Patch audio into the graph when building.
+                output_tap_module: io_in,
+                output_tap_port: 0,
+            },
+            io_endpoints: standard_io_endpoints(io_in, at(0, 1), at(1, 1)),
+            canvas: Some(PatchCanvas {
+                width: 8,
+                height: 6,
+            }),
+        }
+    }
+
+    /// Example groove: sequenced bass + kick + snare + MIDI lead.
+    /// Shipped as `patches/groove.json` in the repo.
+    ///
+    /// Lattice:
     /// ```text
     ///   Clock  BassSeq Quant BassVCO BassVCF BassEnv BassVCA
     ///   SnClk  KickSeq      KickVCO        KickEnv KickVCA
@@ -305,7 +501,7 @@ impl Default for Patch {
     ///   MIDI   LeadVCO LeadVCF LeadEnvA LeadEnvF LeadVCA  Mix Scope
     ///   In     Out
     /// ```
-    fn default() -> Self {
+    pub fn example_groove() -> Self {
         let mut next_id = 0u32;
         let mut alloc = || {
             let id = next_id;
@@ -726,124 +922,6 @@ impl Default for Patch {
             cable(mixer, Mixer::OUT_MIX, scope, Oscilloscope::IN_AUDIO),
         ];
 
-        let audio_in_params = vec![
-            ParamInfo {
-                name: "Ch1 Scale".into(),
-                param: Io::param_capture_scale(0),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Ch1 Offset".into(),
-                param: Io::param_capture_offset(0),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-            ParamInfo {
-                name: "Ch2 Scale".into(),
-                param: Io::param_capture_scale(1),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Ch2 Offset".into(),
-                param: Io::param_capture_offset(1),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-        ];
-
-        // Master Io channel order: L, R, pitch CV, gate CV.
-        let audio_out_params = vec![
-            ParamInfo {
-                name: "Audio L Scale".into(),
-                param: Io::param_send_scale(0),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Audio L Offset".into(),
-                param: Io::param_send_offset(0),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-            ParamInfo {
-                name: "Audio R Scale".into(),
-                param: Io::param_send_scale(1),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Audio R Offset".into(),
-                param: Io::param_send_offset(1),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-            ParamInfo {
-                name: "Pitch Scale".into(),
-                param: Io::param_send_scale(2),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Pitch Offset".into(),
-                param: Io::param_send_offset(2),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-            ParamInfo {
-                name: "Gate Scale".into(),
-                param: Io::param_send_scale(3),
-                min: 0.0,
-                max: 2.0,
-                default_value: 1.0,
-            },
-            ParamInfo {
-                name: "Gate Offset".into(),
-                param: Io::param_send_offset(3),
-                min: -1.0,
-                max: 1.0,
-                default_value: 0.0,
-            },
-        ];
-
-        let io_endpoints = vec![
-            IoEndpoint {
-                id: IO_ENDPOINT_AUDIO_OUT.into(),
-                name: "Audio Out".into(),
-                kind: "io".into(),
-                direction: IoDirection::Output,
-                channels: 4,
-                device: IO_DEVICE_DEFAULT.into(),
-                device_channel_offset: 0,
-                module: None,
-                params: audio_out_params,
-                coordinates: at(1, 4),
-            },
-            IoEndpoint {
-                id: IO_ENDPOINT_AUDIO_IN.into(),
-                name: "Audio In".into(),
-                kind: "io".into(),
-                direction: IoDirection::Input,
-                channels: 2,
-                device: IO_DEVICE_DEFAULT.into(),
-                device_channel_offset: 0,
-                module: Some(io_in),
-                params: audio_in_params,
-                coordinates: at(0, 4),
-            },
-        ];
-
         Self {
             next_id,
             next_cable_id,
@@ -857,16 +935,14 @@ impl Default for Patch {
                 output_tap_module: scope,
                 output_tap_port: Oscilloscope::OUT_AUDIO,
             },
-            io_endpoints,
+            io_endpoints: standard_io_endpoints(io_in, at(0, 4), at(1, 4)),
             canvas: Some(PatchCanvas {
                 width: 16,
                 height: 10,
             }),
         }
     }
-}
 
-impl Patch {
     /// Adds a module of `kind`, returning its stable id.
     pub fn add_module(&mut self, kind: &str) -> Result<u32, PatchError> {
         let info = registry::type_info(kind)
@@ -922,6 +998,15 @@ impl Patch {
             }
         }
         ModuleCoordinates::new(0, 64)
+    }
+
+    /// Point the main voice audio bus at `module`'s output `port`.
+    /// That signal is what every voice mixes into master Audio Out L/R.
+    pub fn set_output_tap(&mut self, module: u32, port: usize) -> Result<(), PatchError> {
+        self.validate_port(module, port, true)?;
+        self.roles.output_tap_module = module;
+        self.roles.output_tap_port = port;
+        Ok(())
     }
 
     /// Set lattice coordinates for a module (control surface only).
@@ -1327,8 +1412,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_patch_builds_and_makes_sound() {
+    fn empty_default_builds_and_is_silent() {
         let patch = Patch::default();
+        // Only MIDI→CV (engine role) + Audio In Io; Audio Out is master-side.
+        assert_eq!(patch.modules.len(), 2);
+        assert!(patch.cables.is_empty());
+        let built = patch.build(48_000.0).expect("build");
+        let mut voice = Voice::from_built(built, 48_000.0);
+        let mut out = [0.0f32; 256];
+        voice.process_block(&mut out);
+        assert!(out.iter().all(|&s| s.is_finite()));
+        // No capture → silence.
+        assert!(out.iter().all(|&s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn example_groove_makes_sound() {
+        let patch = Patch::example_groove();
         let built = patch.build(48_000.0).expect("build");
         let mut voice = Voice::from_built(built, 48_000.0);
         voice.note_on(440.0, 0.8);
@@ -1341,27 +1441,24 @@ mod tests {
                 energy += f64::from(s * s);
             }
         }
-        assert!(energy > 0.0, "expected audio from default patch");
+        assert!(energy > 0.0, "expected audio from groove example");
     }
 
     #[test]
-    fn default_patch_positions_every_module_and_endpoint() {
-        let patch = Patch::default();
-        assert!(!patch.modules.is_empty());
-        // Coordinates are required (non-optional type); also check uniqueness
-        // of the default layout so tiles don't stack.
-        let mut cells: Vec<(u32, u32)> = patch
-            .modules
-            .iter()
-            .map(|m| (m.coordinates.x, m.coordinates.y))
-            .collect();
-        cells.sort_unstable();
-        let before = cells.len();
-        cells.dedup();
-        assert_eq!(cells.len(), before, "default modules share a lattice cell");
-        for ep in &patch.io_endpoints {
-            // Type guarantees presence; assert sensible values for default layout.
-            assert!(ep.coordinates.x < 16 && ep.coordinates.y < 16);
+    fn empty_and_groove_have_unique_coordinates() {
+        for patch in [Patch::empty(), Patch::example_groove()] {
+            let mut cells: Vec<(u32, u32)> = patch
+                .modules
+                .iter()
+                .map(|m| (m.coordinates.x, m.coordinates.y))
+                .collect();
+            cells.sort_unstable();
+            let before = cells.len();
+            cells.dedup();
+            assert_eq!(cells.len(), before, "modules share a lattice cell");
+            for ep in &patch.io_endpoints {
+                assert!(ep.coordinates.x < 32 && ep.coordinates.y < 32);
+            }
         }
     }
 
@@ -1407,22 +1504,16 @@ mod tests {
         use crate::modules::Mixer;
 
         let mut patch = Patch::default();
-        let id = patch.add_module("mixer").unwrap();
-        assert!(patch.modules.iter().any(|m| m.id == id));
-        let vco = patch
-            .modules
-            .iter()
-            .find(|m| m.kind == "vco")
-            .unwrap()
-            .id;
-        patch.connect(vco, Vco::OUT_SAW, id, Mixer::IN_1).unwrap();
+        let vco = patch.add_module("vco").unwrap();
+        let mix = patch.add_module("mixer").unwrap();
+        patch.connect(vco, Vco::OUT_SAW, mix, Mixer::IN_1).unwrap();
         assert!(patch
             .cables
             .iter()
-            .any(|c| c.src_module == vco && c.dst_module == id));
-        patch.remove_module(id).unwrap();
-        assert!(!patch.modules.iter().any(|m| m.id == id));
-        assert!(!patch.cables.iter().any(|c| c.dst_module == id));
+            .any(|c| c.src_module == vco && c.dst_module == mix));
+        patch.remove_module(mix).unwrap();
+        assert!(!patch.modules.iter().any(|m| m.id == mix));
+        assert!(!patch.cables.iter().any(|c| c.dst_module == mix));
     }
 
     #[test]
@@ -1433,12 +1524,30 @@ mod tests {
     }
 
     #[test]
+    fn set_output_tap_points_main_bus() {
+        let mut patch = Patch::default();
+        let vco = patch.add_module("vco").unwrap();
+        patch
+            .set_output_tap(vco, Vco::OUT_SAW)
+            .expect("set tap");
+        assert_eq!(patch.roles.output_tap_module, vco);
+        assert_eq!(patch.roles.output_tap_port, Vco::OUT_SAW);
+        patch.build(48_000.0).expect("build after retap");
+    }
+
+    #[test]
     fn disconnect_removes_cable() {
         let mut patch = Patch::default();
-        let c = patch.cables[0].clone();
-        patch
-            .disconnect(c.src_module, c.src_port, c.dst_module, c.dst_port)
+        let midi = patch.roles.note_source;
+        let io = patch.roles.external_input;
+        // Any valid cable is fine — empty starts with none.
+        let id = patch
+            .connect(midi, MidiToCv::OUT_GATE, io, 0)
             .unwrap();
-        assert!(!patch.cables.iter().any(|x| x.id == c.id));
+        assert_eq!(patch.cables.len(), 1);
+        patch
+            .disconnect(midi, MidiToCv::OUT_GATE, io, 0)
+            .unwrap();
+        assert!(!patch.cables.iter().any(|x| x.id == id));
     }
 }

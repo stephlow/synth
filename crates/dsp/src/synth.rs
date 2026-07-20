@@ -276,6 +276,12 @@ impl Synth {
         self.patch.set_module_coordinates(id, x, y)
     }
 
+    /// Assign the voice main-bus tap (rebuilds voices).
+    pub fn set_output_tap(&mut self, module: u32, port: usize) -> Result<(), PatchError> {
+        self.patch.set_output_tap(module, port)?;
+        self.rebuild_voices()
+    }
+
     /// Batch-update lattice coordinates and optional canvas. Document-only.
     pub fn set_coordinates(
         &mut self,
@@ -589,7 +595,8 @@ mod tests {
 
     #[test]
     fn note_off_does_not_immediately_free_a_still_releasing_voice() {
-        let mut synth = Synth::new(100.0);
+        // Groove patch uses an envelope as activity_gate (release tail).
+        let mut synth = Synth::from_patch(Patch::example_groove(), 100.0).unwrap();
         synth.note_on(note(60), velocity(100));
         // Let the envelope observe the gate opening.
         synth.process_block(1);
@@ -624,10 +631,21 @@ mod tests {
     // just the voice-allocation bookkeeping the tests above check.
 
     #[test]
-    fn free_running_groove_without_notes() {
-        // Default patch free-runs bass/kick/snare; MIDI lead stays silent
-        // until a note is held.
+    fn empty_default_is_silent_without_notes() {
         let mut synth = Synth::new(48_000.0);
+        synth.process_block(256);
+        assert!(
+            synth
+                .output_channel(Synth::CHANNEL_AUDIO_L)
+                .iter()
+                .all(|&s| s.abs() < 1e-6),
+            "empty default should be silent"
+        );
+    }
+
+    #[test]
+    fn groove_example_free_runs_without_notes() {
+        let mut synth = Synth::from_patch(Patch::example_groove(), 48_000.0).unwrap();
         let mut energy = 0.0f64;
         for _ in 0..40 {
             synth.process_block(256);
@@ -644,10 +662,10 @@ mod tests {
 
     #[test]
     fn produces_bounded_finite_nonsilent_audio_while_a_note_is_held() {
-        let mut synth = Synth::new(48_000.0);
+        // Groove example has a MIDI lead path.
+        let mut synth = Synth::from_patch(Patch::example_groove(), 48_000.0).unwrap();
         synth.note_on(note(69), velocity(100)); // A4, 440Hz
 
-        // Render enough blocks to get past the (10ms) attack stage.
         let mut energy = 0.0f64;
         for _ in 0..20 {
             synth.process_block(256);
@@ -662,8 +680,7 @@ mod tests {
 
     #[test]
     fn lead_release_does_not_stop_the_groove() {
-        // After the MIDI lead releases, free-running bass/drums keep going.
-        let mut synth = Synth::new(48_000.0);
+        let mut synth = Synth::from_patch(Patch::example_groove(), 48_000.0).unwrap();
         synth.note_on(note(69), velocity(100));
 
         for _ in 0..10 {
@@ -709,7 +726,7 @@ mod tests {
 
     #[test]
     fn mono_mix_is_dualled_to_left_and_right() {
-        let mut synth = Synth::new(48_000.0);
+        let mut synth = Synth::from_patch(Patch::example_groove(), 48_000.0).unwrap();
         for _ in 0..20 {
             synth.process_block(256);
         }
@@ -815,7 +832,7 @@ mod tests {
 
     #[test]
     fn live_signals_nonzero_while_note_held() {
-        let mut synth = Synth::new(48_000.0);
+        let mut synth = Synth::from_patch(Patch::example_groove(), 48_000.0).unwrap();
         synth.note_on(note(60), velocity(100));
         for _ in 0..20 {
             synth.process_block(256);
@@ -826,16 +843,11 @@ mod tests {
             .iter()
             .cloned()
             .fold(0.0f32, f32::max);
-        eprintln!("module_count={} max_peak={any_peak}", bank.module_count);
-        for i in 0..bank.module_count.min(8) {
-            eprintln!("  id={} peak={}", bank.module_ids[i], bank.module_peaks[i]);
-        }
         assert!(any_peak > 0.01, "max module peak {any_peak}");
         let cab = bank.cable_peaks[..bank.cable_count]
             .iter()
             .cloned()
             .fold(0.0f32, f32::max);
-        eprintln!("cable_count={} max_peak={cab}", bank.cable_count);
         assert!(cab > 0.01, "max cable peak {cab}");
     }
 

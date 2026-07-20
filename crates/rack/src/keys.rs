@@ -4,23 +4,28 @@ use crossterm::event::KeyCode;
 use synth_proto::synth_client::SynthClient;
 use synth_proto::{
     AddModuleRequest, ConnectRequest, DisconnectRequest, Empty, LoadPatchRequest,
-    ModuleCoordinatesEntry, NoteOffRequest, NoteOnRequest, PatchCanvas, RemoveModuleRequest,
-    SetCoordinatesRequest, SetIoDeviceRequest, SetParamRequest,
+    ModuleCoordinatesEntry, PatchCanvas, RemoveModuleRequest, SetCoordinatesRequest,
+    SetIoDeviceRequest, SetOutputTapRequest, SetParamRequest,
 };
 use tracing::{debug, info, warn};
 
 use crate::app::App;
 use crate::menu_build;
-use crate::model::{MenuAction, ModuleId, PendingCable, DEFAULT_PATCH_FILE, NOTE_KEYS};
+use crate::model::{MenuAction, PathEdit, PendingCable};
 
 pub async fn handle_key(
     app: &mut App,
     client: &mut SynthClient<tonic::transport::Channel>,
     code: KeyCode,
 ) {
-    // Always quit.
-    if matches!(code, KeyCode::Char('q')) {
+    // Always quit — except while typing a path (so 'q' can appear in filenames).
+    if matches!(code, KeyCode::Char('q')) && app.path_edit.is_none() {
         app.quit = true;
+        return;
+    }
+
+    if app.path_edit.is_some() {
+        handle_path_edit(app, client, code).await;
         return;
     }
 
@@ -93,7 +98,7 @@ async fn flush_coordinates(
 
 async fn handle_lattice(
     app: &mut App,
-    client: &mut SynthClient<tonic::transport::Channel>,
+    _client: &mut SynthClient<tonic::transport::Channel>,
     code: KeyCode,
 ) {
     match code {
@@ -109,12 +114,6 @@ async fn handle_lattice(
         KeyCode::Enter => {
             let menu = menu_build::root_menu(app);
             app.push_menu(menu);
-        }
-        // Performance keys (not menu actions) — live notes while patching.
-        KeyCode::Char(ch) => {
-            if let Some(&(_, note)) = NOTE_KEYS.iter().find(|(k, _)| *k == ch) {
-                toggle_note(app, client, note).await;
-            }
         }
         _ => {}
     }
@@ -287,9 +286,6 @@ async fn activate_menu_item(
         MenuAction::OpenDevices { endpoint_id } => {
             app.push_menu(menu_build::devices_menu(app, &endpoint_id));
         }
-        MenuAction::OpenNotes { module_idx } => {
-            app.push_menu(menu_build::notes_menu(app, module_idx));
-        }
         MenuAction::OpenInfo { module_idx } => {
             app.push_menu(menu_build::info_menu(app, module_idx));
         }
@@ -304,13 +300,31 @@ async fn activate_menu_item(
             });
             app.clear_menus();
             app.status = format!(
-                "armed {}.{} — target a module, Enter → Inputs…",
+                "armed {}.{} — move to a module (or Audio Out), Enter",
                 app.module_short(module),
                 name
             );
         }
         MenuAction::ConnectInput { module, port, name } => {
             connect_input(app, client, module, port, &name).await;
+        }
+        MenuAction::SetOutputTap { module, port, name } => {
+            match client
+                .set_output_tap(SetOutputTapRequest { module, port })
+                .await
+            {
+                Ok(resp) => {
+                    app.apply_snapshot(resp.into_inner());
+                    app.pending = None;
+                    app.clear_menus();
+                    app.status = format!(
+                        "main out ← {}.{}",
+                        app.module_short(module),
+                        name
+                    );
+                }
+                Err(err) => app.status = format!("set out failed: {err}"),
+            }
         }
         MenuAction::DisconnectCable {
             cable_id,
@@ -373,13 +387,15 @@ async fn activate_menu_item(
                 app.status = "cannot move this module".into();
             }
         }
-        MenuAction::SavePatch => {
+        MenuAction::NewPatch => {
             app.clear_menus();
-            save_patch(app, client).await;
+            new_patch(app, client).await;
+        }
+        MenuAction::SavePatch => {
+            app.begin_save_path();
         }
         MenuAction::LoadPatch => {
-            app.clear_menus();
-            load_patch(app, client).await;
+            app.begin_load_path();
         }
         MenuAction::DeleteModule { module_id } => {
             match client
@@ -420,31 +436,6 @@ async fn activate_menu_item(
                 Err(err) => app.status = format!("device failed: {err}"),
             }
         }
-        MenuAction::ToggleNote { midi } => {
-            toggle_note(app, client, midi).await;
-            // Refresh notes menu in place if still open.
-            if let Some(top) = app.menu_stack.last() {
-                if top.title == "notes" {
-                    // Rebuild notes for keyboard module under cursor or any keyboard.
-                    let kbd = app
-                        .modules
-                        .iter()
-                        .position(|m| matches!(m.id, ModuleId::Keyboard));
-                    if let Some(idx) = kbd {
-                        let sel = top.selected;
-                        let filter = top.filter.clone();
-                        let mut menu = menu_build::notes_menu(app, idx);
-                        menu.filter = filter;
-                        menu.selected = sel;
-                        menu.clamp_selection();
-                        if let Some(slot) = app.menu_stack.last_mut() {
-                            *slot = menu;
-                        }
-                    }
-                }
-            }
-            app.refresh_status();
-        }
     }
 }
 
@@ -481,16 +472,90 @@ async fn connect_input(
     }
 }
 
-async fn save_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>) {
+async fn handle_path_edit(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    code: KeyCode,
+) {
+    match code {
+        KeyCode::Esc => {
+            app.cancel_path_edit();
+            app.status = "path entry cancelled".into();
+        }
+        KeyCode::Enter => {
+            let Some(pe) = app.path_edit.clone() else {
+                return;
+            };
+            let path = pe.path().trim().to_string();
+            if path.is_empty() {
+                app.status = "path is empty".into();
+                return;
+            }
+            match pe {
+                PathEdit::Save { .. } => {
+                    commit_save(app, client, &path).await;
+                }
+                PathEdit::Load { .. } => {
+                    commit_load(app, client, &path).await;
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            if let Some(pe) = app.path_edit.as_mut() {
+                pe.path_mut().pop();
+                app.refresh_status();
+            }
+        }
+        KeyCode::Char(ch) if !ch.is_control() => {
+            if let Some(pe) = app.path_edit.as_mut() {
+                pe.path_mut().push(ch);
+                app.refresh_status();
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn new_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>) {
+    match client.new_patch(Empty {}).await {
+        Ok(resp) => {
+            // Drop remembered placements so default coords win cleanly.
+            app.placement_memory.clear();
+            app.pending = None;
+            app.apply_snapshot(resp.into_inner());
+            app.clear_menus();
+            app.status = "new patch (default)".into();
+            info!("new_patch applied");
+        }
+        Err(err) => app.status = format!("new failed: {err}"),
+    }
+}
+
+async fn commit_save(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    path: &str,
+) {
     // Ensure current lattice layout is in the document before export.
     flush_coordinates(app, client).await;
     match client.save_patch(Empty {}).await {
         Ok(resp) => {
             let json = resp.into_inner().document_json;
-            match std::fs::write(DEFAULT_PATCH_FILE, &json) {
+            if let Some(parent) = std::path::Path::new(path).parent() {
+                if !parent.as_os_str().is_empty() {
+                    if let Err(err) = std::fs::create_dir_all(parent) {
+                        app.status = format!("mkdir failed: {err}");
+                        return;
+                    }
+                }
+            }
+            match std::fs::write(path, &json) {
                 Ok(()) => {
-                    app.status = format!("saved {DEFAULT_PATCH_FILE}");
-                    info!(path = DEFAULT_PATCH_FILE, "saved");
+                    app.last_patch_path = path.to_string();
+                    app.persist_settings();
+                    app.path_edit = None;
+                    app.status = format!("saved {path}");
+                    info!(%path, "saved");
                 }
                 Err(err) => app.status = format!("write failed: {err}"),
             }
@@ -499,8 +564,12 @@ async fn save_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Ch
     }
 }
 
-async fn load_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>) {
-    match std::fs::read_to_string(DEFAULT_PATCH_FILE) {
+async fn commit_load(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    path: &str,
+) {
+    match std::fs::read_to_string(path) {
         Ok(json) => match client
             .load_patch(LoadPatchRequest {
                 document_json: json,
@@ -508,35 +577,20 @@ async fn load_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Ch
             .await
         {
             Ok(resp) => {
+                app.placement_memory.clear();
+                app.pending = None;
                 app.apply_snapshot(resp.into_inner());
+                app.last_patch_path = path.to_string();
+                app.persist_settings();
+                app.path_edit = None;
                 app.clear_menus();
-                app.status = format!("loaded {DEFAULT_PATCH_FILE}");
+                app.status = format!("loaded {path}");
+                info!(%path, "loaded");
             }
             Err(err) => app.status = format!("load failed: {err}"),
         },
-        Err(err) => app.status = format!("read {DEFAULT_PATCH_FILE}: {err}"),
+        Err(err) => app.status = format!("read {path}: {err}"),
     }
 }
 
-async fn toggle_note(
-    app: &mut App,
-    client: &mut SynthClient<tonic::transport::Channel>,
-    note: u8,
-) {
-    if app.held_notes.remove(&note) {
-        let _ = client
-            .note_off(NoteOffRequest { note: note as u32 })
-            .await;
-        debug!(note, "note_off");
-    } else {
-        app.held_notes.insert(note);
-        let _ = client
-            .note_on(NoteOnRequest {
-                note: note as u32,
-                velocity: 100,
-            })
-            .await;
-        debug!(note, "note_on");
-    }
-    app.refresh_status();
-}
+

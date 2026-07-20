@@ -6,12 +6,14 @@ use crate::model::{Item, MenuAction, MenuEntry, MenuState, ModuleId};
 /// Root menu for the cell under the cursor.
 pub fn root_menu(app: &App) -> MenuState {
     if let Some(idx) = app.module_at_cursor() {
-        // Pending cable: jump straight to inputs if this module has any.
+        // Armed source: jump straight to destinations (graph inputs or main out).
         if app.pending.is_some() {
+            if app.is_master_audio_out(idx) {
+                return inputs_menu(app, idx);
+            }
             if let Some(m) = app.modules.get(idx) {
-                if matches!(m.id, ModuleId::Voice(_))
-                    && m.items.iter().any(|it| matches!(it, Item::Input { .. }))
-                {
+                let has_in = m.items.iter().any(|it| matches!(it, Item::Input { .. }));
+                if has_in {
                     return inputs_menu(app, idx);
                 }
             }
@@ -27,16 +29,18 @@ fn empty_cell_menu() -> MenuState {
         vec![
             MenuEntry::submenu("Add module…", MenuAction::OpenAddKinds),
             MenuEntry::submenu("Theme…", MenuAction::OpenThemes),
-            MenuEntry::action("Save patch", MenuAction::SavePatch),
-            MenuEntry::action("Load patch", MenuAction::LoadPatch),
+            MenuEntry::action("New patch", MenuAction::NewPatch),
+            MenuEntry::action("Save patch…", MenuAction::SavePatch),
+            MenuEntry::action("Load patch…", MenuAction::LoadPatch),
         ],
     )
 }
 
 fn append_rack_actions(items: &mut Vec<MenuEntry>) {
     items.push(MenuEntry::submenu("Theme…", MenuAction::OpenThemes));
-    items.push(MenuEntry::action("Save patch", MenuAction::SavePatch));
-    items.push(MenuEntry::action("Load patch", MenuAction::LoadPatch));
+    items.push(MenuEntry::action("New patch", MenuAction::NewPatch));
+    items.push(MenuEntry::action("Save patch…", MenuAction::SavePatch));
+    items.push(MenuEntry::action("Load patch…", MenuAction::LoadPatch));
 }
 
 /// Built-in theme presets.
@@ -106,6 +110,33 @@ fn module_root_menu(app: &App, module_idx: usize) -> MenuState {
         }
         ModuleId::Io(endpoint_id) => {
             let has_params = m.items.iter().any(|it| matches!(it, Item::Param { .. }));
+            let has_in = m.items.iter().any(|it| matches!(it, Item::Input { .. }));
+            let has_out = m.items.iter().any(|it| matches!(it, Item::Output { .. }));
+            let master_out = app.is_master_audio_out(module_idx);
+            // When a source is armed, assign/main-bus comes first (not Device/params).
+            if master_out || has_in {
+                let label = if app.pending.is_some() {
+                    if master_out {
+                        "Assign main out…"
+                    } else {
+                        "Assign input…"
+                    }
+                } else if master_out {
+                    "Main bus…"
+                } else {
+                    "Inputs…"
+                };
+                items.push(MenuEntry::submenu(
+                    label,
+                    MenuAction::OpenInputs { module_idx },
+                ));
+            }
+            if has_out {
+                items.push(MenuEntry::submenu(
+                    "Outputs…",
+                    MenuAction::OpenOutputs { module_idx },
+                ));
+            }
             if has_params {
                 items.push(MenuEntry::submenu(
                     "Parameters…",
@@ -125,30 +156,6 @@ fn module_root_menu(app: &App, module_idx: usize) -> MenuState {
             items.push(MenuEntry::submenu(
                 "Info",
                 MenuAction::OpenInfo { module_idx },
-            ));
-        }
-        ModuleId::Keyboard => {
-            items.push(MenuEntry::submenu(
-                "Notes…",
-                MenuAction::OpenNotes { module_idx },
-            ));
-            items.push(MenuEntry::action(
-                "Move…",
-                MenuAction::StartMove { module_idx },
-            ));
-            items.push(MenuEntry::submenu(
-                "Info",
-                MenuAction::OpenInfo { module_idx },
-            ));
-        }
-        ModuleId::Scope | ModuleId::Meter => {
-            items.push(MenuEntry::submenu(
-                "Readout",
-                MenuAction::OpenInfo { module_idx },
-            ));
-            items.push(MenuEntry::action(
-                "Move…",
-                MenuAction::StartMove { module_idx },
             ));
         }
     }
@@ -186,26 +193,48 @@ pub fn params_menu(app: &App, module_idx: usize) -> MenuState {
 pub fn outputs_menu(app: &App, module_idx: usize) -> MenuState {
     let m = &app.modules[module_idx];
     let voice = match &m.id {
-        ModuleId::Voice(id) => *id,
-        _ => 0,
+        ModuleId::Voice(id) => Some(*id),
+        ModuleId::Io(epid) => {
+            let ep_name = app
+                .io_endpoints
+                .iter()
+                .find(|e| e.id == *epid)
+                .map(|e| e.name.as_str());
+            app.voice_modules
+                .iter()
+                .find(|vm| {
+                    vm.kind == "io"
+                        && ep_name.is_some_and(|n| vm.name == n)
+                })
+                .or_else(|| app.voice_modules.iter().find(|vm| vm.kind == "io"))
+                .map(|vm| vm.id)
+        }
     };
     let mut items = Vec::new();
-    for it in &m.items {
-        if let Item::Output { port, name } = it {
-            let peer = app.jack_peer_hint(voice, *port, true);
-            let label = if peer.is_empty() {
-                format!("{name}  (open)")
-            } else {
-                format!("{name}  {peer}")
-            };
-            items.push(MenuEntry::action(
-                label,
-                MenuAction::ArmOutput {
-                    module: voice,
-                    port: *port,
-                    name: name.clone(),
-                },
-            ));
+    if let Some(voice) = voice {
+        for it in &m.items {
+            if let Item::Output { port, name } = it {
+                let peer = app.jack_peer_hint(voice, *port, true);
+                let tap = app.roles.output_tap_module == voice
+                    && app.roles.output_tap_port == *port;
+                let mut label = name.clone();
+                if tap {
+                    label.push_str("  ◆main");
+                }
+                if !peer.is_empty() {
+                    label.push_str("  ");
+                    label.push_str(&peer);
+                }
+                // Arm only — destination is a lattice module (or Audio Out main bus).
+                items.push(MenuEntry::action(
+                    label,
+                    MenuAction::ArmOutput {
+                        module: voice,
+                        port: *port,
+                        name: name.clone(),
+                    },
+                ));
+            }
         }
     }
     if items.is_empty() {
@@ -216,11 +245,40 @@ pub fn outputs_menu(app: &App, module_idx: usize) -> MenuState {
 
 pub fn inputs_menu(app: &App, module_idx: usize) -> MenuState {
     let m = &app.modules[module_idx];
+    let mut items = Vec::new();
+
+    // Master Audio Out: main bus is a role (SetOutputTap), not a graph cable.
+    if app.is_master_audio_out(module_idx) {
+        let current = app.main_bus_source_label();
+        if let Some(p) = app.pending {
+            let src_name = app.port_name(p.src_module, p.src_port, true);
+            let src = format!("{}.{}", app.module_short(p.src_module), src_name);
+            items.push(MenuEntry::action(
+                format!("Audio L/R  ←  {src}"),
+                MenuAction::SetOutputTap {
+                    module: p.src_module,
+                    port: p.src_port,
+                    name: src_name,
+                },
+            ));
+            items.push(MenuEntry::value(
+                "(dual mono — same bus on L and R)",
+            ));
+            items.push(MenuEntry::value(format!("current  {current}")));
+        } else {
+            items.push(MenuEntry::value(format!("Audio L/R  ←  {current}")));
+            items.push(MenuEntry::value(
+                "change: Outputs… → arm jack → Enter here",
+            ));
+            items.push(MenuEntry::value("Pitch CV / Gate  ←  master MIDI"));
+        }
+        return MenuState::new(format!("{} · main bus", m.title), items);
+    }
+
     let voice = match &m.id {
         ModuleId::Voice(id) => *id,
         _ => 0,
     };
-    let mut items = Vec::new();
     for it in &m.items {
         if let Item::Input { port, name } = it {
             let peer = app.jack_peer_hint(voice, *port, false);
@@ -249,6 +307,8 @@ pub fn inputs_menu(app: &App, module_idx: usize) -> MenuState {
     };
     MenuState::new(title, items)
 }
+
+
 
 pub fn disconnect_menu(app: &App, module_idx: usize) -> MenuState {
     let m = &app.modules[module_idx];
@@ -334,26 +394,6 @@ pub fn devices_menu(app: &App, endpoint_id: &str) -> MenuState {
     MenuState::new(format!("device · {endpoint_id}"), items)
 }
 
-pub fn notes_menu(app: &App, module_idx: usize) -> MenuState {
-    let mut items = Vec::new();
-    if let Some(m) = app.modules.get(module_idx) {
-        for it in &m.items {
-            if let Item::Note { midi, label } = it {
-                let held = app.held_notes.contains(midi);
-                let mark = if held { "●" } else { "○" };
-                items.push(MenuEntry::action(
-                    format!("{mark}  {label}  ({midi})"),
-                    MenuAction::ToggleNote { midi: *midi },
-                ));
-            }
-        }
-    }
-    if items.is_empty() {
-        items.push(MenuEntry::value("(no notes)"));
-    }
-    MenuState::new("notes", items)
-}
-
 pub fn info_menu(app: &App, module_idx: usize) -> MenuState {
     let mut items = Vec::new();
     let Some(m) = app.modules.get(module_idx) else {
@@ -375,23 +415,6 @@ pub fn info_menu(app: &App, module_idx: usize) -> MenuState {
                     meter.device_name, meter.connected
                 )));
             }
-        }
-        ModuleId::Scope => {
-            items.push(MenuEntry::value(format!(
-                "scope samples {}",
-                app.scope.len()
-            )));
-            items.push(MenuEntry::value(format!("peak   {:.3}", app.output_peak)));
-        }
-        ModuleId::Meter => {
-            items.push(MenuEntry::value(format!("peak   {:.3}", app.output_peak)));
-            items.push(MenuEntry::value(format!("voices {}", app.active_voices)));
-        }
-        ModuleId::Keyboard => {
-            items.push(MenuEntry::value(format!(
-                "held   {}",
-                app.held_notes.len()
-            )));
         }
     }
     MenuState::new(format!("{} · info", m.title), items)

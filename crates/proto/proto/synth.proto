@@ -49,12 +49,18 @@ service Synth {
   rpc PatchDisconnect(DisconnectRequest) returns (PatchSnapshot);
 
   // Load/save the patch document as JSON (same format as GetPatch.document_json).
+  // File paths are a control-surface concern; these RPCs only move JSON.
   rpc LoadPatch(LoadPatchRequest) returns (PatchSnapshot);
   rpc SavePatch(Empty) returns (SavePatchResponse);
+  // Reset the engine to the built-in default patch (fresh document + rebuild).
+  rpc NewPatch(Empty) returns (PatchSnapshot);
 
   // Control-surface lattice layout (ignored by DSP).
   rpc SetModuleCoordinates(SetModuleCoordinatesRequest) returns (PatchSnapshot);
   rpc SetCoordinates(SetCoordinatesRequest) returns (PatchSnapshot);
+
+  // Point the voice main-bus tap at a module output (what feeds Audio Out L/R).
+  rpc SetOutputTap(SetOutputTapRequest) returns (PatchSnapshot);
 }
 
 message Empty {}
@@ -304,4 +310,10 @@ message LoadPatchRequest {
 
 message SavePatchResponse {
   string document_json = 1;
+}
+
+// Assign which voice-module output is mixed to master Audio Out (L/R dual mono).
+message SetOutputTapRequest {
+  uint32 module = 1;
+  uint32 port = 2;
 }
