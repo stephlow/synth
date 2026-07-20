@@ -112,6 +112,8 @@ message IoEndpointDescriptor {
   uint32 channels = 4;
   // Patch-owned device binding ("default" or a cpal device name).
   string device_name = 5;
+  // Optional lattice position for control surfaces (e.g. master Audio Out).
+  ModuleCoordinates coordinates = 6;
 }
 
 message IoEndpointList {

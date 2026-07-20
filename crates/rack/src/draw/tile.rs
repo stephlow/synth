@@ -6,9 +6,9 @@ use ratatui::style::Style;
 
 use crate::draw::glyph::{paint_glyph, GlyphKind, GlyphPaint};
 use crate::draw::style::{
-    tile_body_armed, tile_body_hot, tile_body_idle, tile_body_soft, tile_border_armed,
+    bg, tile_body_armed, tile_body_hot, tile_body_idle, tile_body_soft, tile_border_armed,
     tile_border_hot, tile_border_idle, tile_border_soft, tile_label_armed, tile_label_hot,
-    tile_label_idle, tile_label_soft, BG,
+    tile_label_idle, tile_label_soft,
 };
 use crate::draw::text::truncate;
 
@@ -106,7 +106,7 @@ pub fn draw_tile(buf: &mut Buffer, area: Rect, view: &TileView<'_>) {
     let x1 = body.x + body.width - 1;
     let y1 = body.y + body.height - 1;
 
-    let clear = Style::default().bg(BG).fg(BG);
+    let clear = Style::default().bg(bg()).fg(bg());
     for y in y0..=y1 {
         for x in x0..=x1 {
             set(buf, x, y, ' ', clear);

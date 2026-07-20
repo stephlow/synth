@@ -12,6 +12,7 @@ use crate::model::{
     kind_abbrev, BuildInput, Item, LatticePos, MenuState, ModuleId, MoveState, PendingCable,
     PlaceKey, UiModule, HINTS,
 };
+use crate::draw::style::ThemeId;
 use crate::place::{self, first_free_near, lattice_bounds, layout_modules, module_at, place_key};
 
 pub struct App {
@@ -62,6 +63,11 @@ pub struct App {
 
     pub term_width: u16,
     pub term_height: u16,
+
+    /// Committed UI color theme (presets).
+    pub theme_id: ThemeId,
+    /// Live preview while Theme… menu is open (None = use `theme_id`).
+    pub theme_preview: Option<ThemeId>,
 }
 
 impl App {
@@ -103,9 +109,40 @@ impl App {
             moving: None,
             term_width: 80,
             term_height: 24,
+            theme_id: ThemeId::Nocturne,
+            theme_preview: None,
         };
         app.apply_snapshot(snap);
         app
+    }
+
+    /// Theme used for drawing (preview if browsing Theme…, else committed).
+    pub fn display_theme(&self) -> ThemeId {
+        self.theme_preview.unwrap_or(self.theme_id)
+    }
+
+    pub fn set_theme(&mut self, id: ThemeId) {
+        self.theme_id = id;
+        self.theme_preview = None;
+        self.status = format!("theme → {}", id.label());
+    }
+
+    /// Preview the theme under the Theme… menu cursor.
+    pub fn preview_theme_from_menu(&mut self) {
+        let Some(menu) = self.menu_stack.last() else {
+            return;
+        };
+        if menu.title != "theme" {
+            return;
+        }
+        if let Some(id) = ThemeId::ALL.get(menu.selected).copied() {
+            self.theme_preview = Some(id);
+            self.status = format!("preview · {}  ·  Enter keep  ·  Esc cancel", id.label());
+        }
+    }
+
+    pub fn clear_theme_preview(&mut self) {
+        self.theme_preview = None;
     }
 
     pub fn set_term_size(&mut self, width: u16, height: u16) {
@@ -143,6 +180,18 @@ impl App {
             if let Some(c) = m.coordinates.as_ref() {
                 self.placement_memory.insert(
                     PlaceKey::Voice(m.id),
+                    LatticePos {
+                        x: c.x.min(u32::from(u16::MAX)) as u16,
+                        y: c.y.min(u32::from(u16::MAX)) as u16,
+                    },
+                );
+            }
+        }
+        // IO endpoint tiles (Audio Out / Audio In) can also carry coordinates.
+        for ep in &self.io_endpoints {
+            if let Some(c) = ep.coordinates.as_ref() {
+                self.placement_memory.insert(
+                    PlaceKey::Io(ep.id.clone()),
                     LatticePos {
                         x: c.x.min(u32::from(u16::MAX)) as u16,
                         y: c.y.min(u32::from(u16::MAX)) as u16,
@@ -477,18 +526,31 @@ impl App {
     }
 
     pub fn push_menu(&mut self, menu: MenuState) {
+        let is_theme = menu.title == "theme";
         self.menu_stack.push(menu);
-        self.refresh_status();
+        if is_theme {
+            self.preview_theme_from_menu();
+        } else {
+            self.refresh_status();
+        }
     }
 
     pub fn pop_menu(&mut self) {
+        let leaving_theme = self
+            .menu_stack
+            .last()
+            .is_some_and(|m| m.title == "theme");
         self.menu_stack.pop();
+        if leaving_theme {
+            self.clear_theme_preview();
+        }
         self.refresh_status();
     }
 
     pub fn clear_menus(&mut self) {
         self.menu_stack.clear();
         self.param_edit = None;
+        self.clear_theme_preview();
         // Do not clear `moving` — menus close when starting a move.
         self.refresh_status();
     }
@@ -504,7 +566,12 @@ impl App {
         let mut i = menu.selected as isize + delta;
         i = ((i % n) + n) % n;
         menu.selected = i as usize;
-        self.refresh_status();
+        let is_theme = menu.title == "theme";
+        if is_theme {
+            self.preview_theme_from_menu();
+        } else {
+            self.refresh_status();
+        }
     }
 
     pub fn port_name(&self, module_id: u32, port: u32, is_output: bool) -> String {

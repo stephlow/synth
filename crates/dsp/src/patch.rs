@@ -108,6 +108,9 @@ pub struct IoEndpoint {
     pub module: Option<u32>,
     /// Calibration knobs (scale/offset) exposed on a control surface.
     pub params: Vec<ParamInfo>,
+    /// Optional lattice position for rack / other UIs (ignored by DSP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<ModuleCoordinates>,
 }
 
 /// Lattice coordinates for a module on a control surface (ignored by DSP).
@@ -529,6 +532,7 @@ impl Default for Patch {
                 device_channel_offset: 0,
                 module: None,
                 params: audio_out_params,
+                coordinates: None,
             },
             IoEndpoint {
                 id: IO_ENDPOINT_AUDIO_IN.into(),
@@ -540,6 +544,7 @@ impl Default for Patch {
                 device_channel_offset: 0,
                 module: Some(io_in),
                 params: audio_in_params,
+                coordinates: None,
             },
         ];
 

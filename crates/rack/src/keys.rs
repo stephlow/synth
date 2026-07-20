@@ -228,6 +228,21 @@ async fn activate_menu_item(
         MenuAction::OpenAddKinds => {
             app.push_menu(menu_build::add_kinds_menu(app));
         }
+        MenuAction::OpenThemes => {
+            app.push_menu(menu_build::themes_menu(app));
+        }
+        MenuAction::SetTheme { theme_index } => {
+            use crate::draw::style::ThemeId;
+            if let Some(id) = ThemeId::ALL.get(theme_index).copied() {
+                app.set_theme(id);
+                // Keep committed theme; clear menus without wiping theme_id.
+                app.menu_stack.clear();
+                app.param_edit = None;
+                app.theme_preview = None;
+                app.refresh_status();
+                app.status = format!("theme → {}", id.label());
+            }
+        }
         MenuAction::OpenDevices { endpoint_id } => {
             app.push_menu(menu_build::devices_menu(app, &endpoint_id));
         }

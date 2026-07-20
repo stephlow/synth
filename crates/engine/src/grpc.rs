@@ -111,6 +111,10 @@ pub fn build_io_descriptors(probe: &Synth) -> Vec<IoEndpointDescriptor> {
             },
             channels: ep.channels as u32,
             device_name: ep.device.clone(),
+            coordinates: ep.coordinates.map(|c| ProtoModuleCoordinates {
+                x: c.x,
+                y: c.y,
+            }),
         })
         .collect()
 }
@@ -302,6 +306,10 @@ impl SynthService {
                 },
                 channels: ep.channels as u32,
                 device_name: ep.device.clone(),
+                coordinates: ep.coordinates.map(|c| ProtoModuleCoordinates {
+                    x: c.x,
+                    y: c.y,
+                }),
             })
             .collect();
 

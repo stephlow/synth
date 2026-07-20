@@ -188,6 +188,10 @@ pub enum MenuAction {
     StartMove { module_idx: usize },
     SavePatch,
     LoadPatch,
+    /// Open Theme… preset list.
+    OpenThemes,
+    /// Apply a built-in theme by index into `ThemeId::ALL`.
+    SetTheme { theme_index: usize },
 }
 
 /// Short kind label for a tile (3 chars max-ish).

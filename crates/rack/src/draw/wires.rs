@@ -6,8 +6,7 @@ use ratatui::style::Style;
 
 use crate::draw::layout::{tile_in_port, tile_out_port, Geom};
 use crate::draw::style::{
-    wire_active, wire_dimmed, wire_hover, wire_idle, wire_pending, wire_soft, PRIMARY, PRIMARY_DIM,
-    PRIMARY_HOT, BG,
+    palette, wire_active, wire_dimmed, wire_hover, wire_idle, wire_pending, wire_soft,
 };
 use crate::model::LatticePos;
 use ratatui::style::Color;
@@ -74,24 +73,24 @@ pub fn draw_wires(
 }
 
 fn style_for_level(level: f32) -> Style {
+    let p = palette();
     let l = level.clamp(0.0, 1.0);
     if l < 0.04 {
         wire_idle()
     } else if l < 0.2 {
         wire_soft()
     } else if l < 0.55 {
-        // Mid: primary dim scaled by level.
         let t = ((l - 0.2) / 0.35).clamp(0.0, 1.0);
         Style::default()
-            .fg(lerp_rgb(PRIMARY_DIM, PRIMARY, t))
-            .bg(BG)
+            .fg(lerp_rgb(p.primary_dim, p.primary, t))
+            .bg(p.bg)
     } else if l < 0.85 {
         wire_active()
     } else {
         let t = ((l - 0.85) / 0.15).clamp(0.0, 1.0);
         Style::default()
-            .fg(lerp_rgb(PRIMARY, PRIMARY_HOT, t))
-            .bg(BG)
+            .fg(lerp_rgb(p.primary, p.primary_hot, t))
+            .bg(p.bg)
     }
 }
 

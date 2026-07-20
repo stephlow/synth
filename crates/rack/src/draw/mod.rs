@@ -7,7 +7,7 @@ pub mod layout;
 mod menu;
 mod screen;
 mod status;
-mod style;
+pub mod style;
 mod text;
 mod tile;
 mod wires;
@@ -21,5 +21,6 @@ use screen::draw_screen;
 pub fn draw(frame: &mut Frame, app: &mut App) {
     // Keep lattice bounds filled to the current viewport.
     app.ensure_cursor_visible();
+    style::set_active(app.display_theme().palette());
     draw_screen(frame, app);
 }

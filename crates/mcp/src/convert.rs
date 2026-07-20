@@ -55,13 +55,20 @@ pub fn module_types(list: &[ModuleType]) -> Value {
 }
 
 pub fn io_endpoint(e: &IoEndpointDescriptor) -> Value {
-    json!({
+    let mut v = json!({
         "id": e.id,
         "name": e.name,
         "direction": e.direction,
         "channels": e.channels,
         "device_name": e.device_name,
-    })
+    });
+    if let Some(c) = e.coordinates.as_ref() {
+        v.as_object_mut().unwrap().insert(
+            "coordinates".into(),
+            json!({ "x": c.x, "y": c.y }),
+        );
+    }
+    v
 }
 
 pub fn io_endpoints(list: &[IoEndpointDescriptor]) -> Value {

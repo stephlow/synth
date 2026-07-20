@@ -29,6 +29,7 @@ fn empty_cell_menu() -> MenuState {
         selected: 0,
         items: vec![
             MenuEntry::submenu("Add module…", MenuAction::OpenAddKinds),
+            MenuEntry::submenu("Theme…", MenuAction::OpenThemes),
             MenuEntry::action("Save patch", MenuAction::SavePatch),
             MenuEntry::action("Load patch", MenuAction::LoadPatch),
         ],
@@ -36,8 +37,30 @@ fn empty_cell_menu() -> MenuState {
 }
 
 fn append_rack_actions(items: &mut Vec<MenuEntry>) {
+    items.push(MenuEntry::submenu("Theme…", MenuAction::OpenThemes));
     items.push(MenuEntry::action("Save patch", MenuAction::SavePatch));
     items.push(MenuEntry::action("Load patch", MenuAction::LoadPatch));
+}
+
+/// Built-in theme presets.
+pub fn themes_menu(app: &App) -> MenuState {
+    use crate::draw::style::ThemeId;
+    let mut items = Vec::new();
+    for (i, id) in ThemeId::ALL.iter().enumerate() {
+        let mark = if *id == app.theme_id { "● " } else { "  " };
+        items.push(MenuEntry::action(
+            format!("{mark}{}", id.label()),
+            MenuAction::SetTheme { theme_index: i },
+        ));
+    }
+    MenuState {
+        title: "theme".into(),
+        selected: ThemeId::ALL
+            .iter()
+            .position(|t| *t == app.theme_id)
+            .unwrap_or(0),
+        items,
+    }
 }
 
 fn module_root_menu(app: &App, module_idx: usize) -> MenuState {
