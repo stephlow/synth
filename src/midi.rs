@@ -8,22 +8,31 @@ use wmidi::{Note, Velocity};
 pub enum MidiMessage {
     NoteOn(Note, Velocity),
     NoteOff(Note, Velocity),
+    ProgramChange(u8),
+    ControlChange(u8, u8),
 }
 
 fn handle_midi_message(bytes: &[u8]) -> Option<MidiMessage> {
-    if let Ok(message) = wmidi::MidiMessage::try_from(bytes) {
-        match message {
+    wmidi::MidiMessage::try_from(bytes)
+        .ok()
+        .and_then(|message| match message {
             wmidi::MidiMessage::NoteOn(_, note, velocity) => {
                 Some(MidiMessage::NoteOn(note, velocity))
             }
             wmidi::MidiMessage::NoteOff(_, note, velocity) => {
                 Some(MidiMessage::NoteOff(note, velocity))
             }
+            wmidi::MidiMessage::ProgramChange(_, program) => {
+                Some(MidiMessage::ProgramChange(u8::from(program)))
+            }
+            wmidi::MidiMessage::ControlChange(_, controller, value) => {
+                Some(MidiMessage::ControlChange(
+                    u8::from(controller),
+                    u8::from(value),
+                ))
+            }
             _ => None,
-        }
-    } else {
-        None
-    }
+        })
 }
 
 pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()>, Box<dyn Error>> {
@@ -35,16 +44,15 @@ pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()
     let in_port = match in_ports.len() {
         0 => return Err("no input port found".into()),
         1 => {
-            println!(
-                "Choosing the only available input port: {}",
-                midi_in.port_name(&in_ports[0]).unwrap()
-            );
+            let port_name = midi_in.port_name(&in_ports[0]).unwrap();
+            println!("Choosing the only available input port: {port_name}");
             &in_ports[0]
         }
         _ => {
             println!("\nAvailable input ports:");
             for (i, p) in in_ports.iter().enumerate() {
-                println!("{}: {}", i, midi_in.port_name(p).unwrap());
+                let port_name = midi_in.port_name(p).unwrap();
+                println!("{i}: {port_name}");
             }
             print!("Please select input port: ");
             stdout().flush()?;
@@ -59,19 +67,18 @@ pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()
     println!("\nOpening connection");
     let in_port_name = midi_in.port_name(in_port)?;
 
-    let tx = tx.clone();
     let conn_in = midi_in.connect(
         in_port,
         "midir-read-input",
         move |_, bytes, _| {
             if let Some(midi_message) = handle_midi_message(bytes) {
-                tx.send(AppMessage::MidiMessage(midi_message)).unwrap();
+                let _ = tx.send(AppMessage::MidiMessage(midi_message));
             }
         },
         (),
     )?;
 
-    println!("Connection open, reading input from '{}'", in_port_name);
+    println!("Connection open, reading input from '{in_port_name}'");
 
     Ok(conn_in)
 }
