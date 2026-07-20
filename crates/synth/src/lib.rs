@@ -16,8 +16,56 @@ pub use synth::Synth;
 /// is preallocated up front — never a runtime allocation or a resize.
 pub const MAX_BLOCK_FRAMES: usize = 1024;
 
-pub enum AppMessage {
-    MidiMessage(midi::MidiMessage),
+/// Everything that can reach the audio thread from the outside: hardware
+/// MIDI, and now also a gRPC client (see the `engine` crate's server). Sent
+/// over an `mpsc::Sender<Command>` and drained with `try_recv` at the top of
+/// each audio callback — never blocking, so any producer (the MIDI thread,
+/// a tonic request handler) is safe to call from off the audio thread.
+pub enum Command {
+    Midi(midi::MidiMessage),
+    SetParam { module: usize, param: usize, value: f32 },
+    SetOutputCalibration { channel: usize, scale: f32, offset: f32 },
+    NoteOn { note: wmidi::Note, velocity: wmidi::Velocity },
+    NoteOff { note: wmidi::Note },
+}
+
+/// Engine state published by the audio thread for anything that wants to
+/// observe it without touching the audio path itself (e.g. a gRPC state
+/// stream). Wait-free: the audio callback only ever does atomic stores here
+/// after `process_block`, and readers only ever do atomic loads — no locks,
+/// no allocation, so this can't jeopardize the real-time deadline.
+pub struct EngineMeters {
+    /// Peak absolute sample value of the most recent block's mixed audio
+    /// output (channel 0), stored as `f32::to_bits`.
+    output_peak_bits: std::sync::atomic::AtomicU32,
+    active_voices: std::sync::atomic::AtomicU32,
+}
+
+impl Default for EngineMeters {
+    fn default() -> Self {
+        Self {
+            output_peak_bits: std::sync::atomic::AtomicU32::new(0.0f32.to_bits()),
+            active_voices: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+}
+
+impl EngineMeters {
+    /// Called from the audio callback after each `process_block`.
+    pub fn update(&self, output_peak: f32, active_voices: u32) {
+        self.output_peak_bits
+            .store(output_peak.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        self.active_voices
+            .store(active_voices, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn output_peak(&self) -> f32 {
+        f32::from_bits(self.output_peak_bits.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn active_voices(&self) -> u32 {
+        self.active_voices.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Counting allocator wrapping the system allocator, active only in test

@@ -1,15 +1,19 @@
+mod grpc;
+
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     SizedSample,
 };
 use cpal::{FromSample, Sample};
 use rtrb::{Consumer, Producer, RingBuffer};
-use std::error::Error;
 use std::io::{stdin, stdout, Write};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
 use synth::midi::{setup_midi, MidiMessage};
 use synth::modules::{Envelope, Lfo, Vcf};
-use synth::{rt, AppMessage, Synth, MAX_BLOCK_FRAMES};
+use synth::{rt, Command, EngineMeters, Synth, MAX_BLOCK_FRAMES};
+use tracing::{error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 /// How many external-input channels are captured from hardware and fed
 /// into the patch — must match `synth::synth::NUM_EXTERNAL_INPUT_CHANNELS`
@@ -20,11 +24,19 @@ const NUM_EXTERNAL_INPUT_CHANNELS: usize = 2;
 /// between the two independent callbacks doesn't cause audible gaps.
 const RING_BUFFER_FRAMES: usize = MAX_BLOCK_FRAMES * 4;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let (tx, rx) = mpsc::channel::<AppMessage>();
+/// Address the gRPC server listens on; the `console` TUI connects here.
+const GRPC_ADDR: &str = "127.0.0.1:50051";
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .init();
+
+    let (tx, rx) = mpsc::channel::<Command>();
 
     // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
-    let _conn_in = setup_midi(tx)?;
+    let _conn_in = setup_midi(tx.clone())?;
 
     // Hardware audio/CV input is optional: if no input device is
     // available (or it fails to open), we fall back to running with
@@ -32,38 +44,50 @@ fn main() -> Result<(), Box<dyn Error>> {
     let (consumers, _input_stream) = match setup_input_stream() {
         Ok((stream, consumers)) => (Some(consumers), Some(stream)),
         Err(err) => {
-            eprintln!("No audio input available ({err}); continuing without external audio/CV input.");
+            warn!(%err, "no audio input available; continuing without external audio/CV input");
             (None, None)
         }
     };
 
-    let stream = stream_setup_for(rx, consumers)?;
+    let meters = Arc::new(EngineMeters::default());
+    let descriptors = {
+        let (_host, _device, config) = host_device_setup()?;
+        let sample_rate = config.sample_rate().0 as f32;
+        // A throwaway Synth just to read off its (data-independent) module
+        // indices for the control descriptor table below; the real Synth
+        // used for audio lives inside the cpal callback (built in
+        // `make_stream`).
+        let probe = Synth::new(sample_rate);
+        grpc::build_control_descriptors(&probe)
+    };
+
+    let stream = stream_setup_for(rx, consumers, Arc::clone(&meters))?;
     stream.play()?;
 
-    // Keep the process alive while the audio and MIDI threads run in the
-    // background; the streams are driven entirely by their own callbacks.
-    loop {
-        std::thread::park();
-    }
+    info!(addr = GRPC_ADDR, "gRPC server listening");
+    grpc::serve(GRPC_ADDR, tx, meters, descriptors).await?;
+
+    Ok(())
 }
 
 pub fn stream_setup_for(
-    rx: Receiver<AppMessage>,
+    rx: Receiver<Command>,
     input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
+    meters: Arc<EngineMeters>,
 ) -> Result<cpal::Stream, anyhow::Error> {
     let (_host, device, config) = host_device_setup()?;
 
     match config.sample_format() {
-        cpal::SampleFormat::I8 => make_stream::<i8>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::I32 => make_stream::<i32>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::I64 => make_stream::<i64>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::U8 => make_stream::<u8>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::U16 => make_stream::<u16>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::U32 => make_stream::<u32>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::U64 => make_stream::<u64>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config.into(), rx, input),
-        cpal::SampleFormat::F64 => make_stream::<f64>(&device, &config.into(), rx, input),
+        cpal::SampleFormat::I8 => make_stream::<i8>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::I32 => make_stream::<i32>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::I64 => make_stream::<i64>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::U8 => make_stream::<u8>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::U16 => make_stream::<u16>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::U32 => make_stream::<u32>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::U64 => make_stream::<u64>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::F64 => make_stream::<f64>(&device, &config.into(), rx, input, meters),
         sample_format => Err(anyhow::Error::msg(format!(
             "Unsupported sample format '{sample_format}'"
         ))),
@@ -74,10 +98,10 @@ pub fn host_device_setup(
 ) -> Result<(cpal::Host, cpal::Device, cpal::SupportedStreamConfig), anyhow::Error> {
     let host = cpal::default_host();
     let device = select_device(host.output_devices()?, "output")?;
-    println!("Output device : {}", device.name()?);
+    info!(device = %device.name()?, "output device selected");
 
     let config = device.default_output_config()?;
-    println!("Default output config : {:?}", config);
+    info!(?config, "default output config");
 
     Ok((host, device, config))
 }
@@ -97,7 +121,7 @@ fn select_device(
         0 => Err(anyhow::Error::msg(format!("No {kind} device available"))),
         1 => {
             let name = devices[0].name().unwrap_or_else(|_| "<unnamed>".into());
-            println!("Choosing the only available {kind} device: {name}");
+            info!(%name, kind, "choosing the only available device");
             Ok(devices.into_iter().next().unwrap())
         }
         _ => {
@@ -131,17 +155,17 @@ fn select_device(
 fn setup_input_stream() -> Result<(cpal::Stream, [Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]), anyhow::Error> {
     let host = cpal::default_host();
     let device = select_device(host.input_devices()?, "input")?;
-    println!("Input device : {}", device.name()?);
+    info!(device = %device.name()?, "input device selected");
 
     let config = device.default_input_config()?;
-    println!("Default input config : {:?}", config);
+    info!(?config, "default input config");
     let in_channels = config.channels() as usize;
 
     let (producer_left, consumer_left) = RingBuffer::<f32>::new(RING_BUFFER_FRAMES);
     let (producer_right, consumer_right) = RingBuffer::<f32>::new(RING_BUFFER_FRAMES);
     let mut producers = [producer_left, producer_right];
 
-    let err_fn = |err| eprintln!("Error building input sound stream: {}", err);
+    let err_fn = |err| error!(%err, "input sound stream error");
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
             &config.into(),
@@ -205,7 +229,9 @@ impl Default for OutputCalibration {
 
 /// Maps a MIDI CC controller number + 0..127 value onto a `Synth`
 /// parameter change. This is the "patch bay of the control surface":
-/// extend this list to wire up more knobs.
+/// extend this list to wire up more knobs. The same param set is exposed
+/// to gRPC clients via `grpc::build_control_descriptors`, so MIDI and the
+/// `console` TUI drive identical targets.
 fn apply_control_change(
     synth: &mut Synth,
     calibration: &mut OutputCalibration,
@@ -268,8 +294,9 @@ fn apply_control_change(
 pub fn make_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    rx: Receiver<AppMessage>,
+    rx: Receiver<Command>,
     input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
+    meters: Arc<EngineMeters>,
 ) -> Result<cpal::Stream, anyhow::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -281,7 +308,7 @@ where
     // Reused every callback: popped-from-the-ring-buffer external input,
     // staged before each block — never (re)allocated on the audio thread.
     let mut external_scratch = [[0.0f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS];
-    let err_fn = |err| eprintln!("Error building output sound stream: {}", err);
+    let err_fn = |err| error!(%err, "output sound stream error");
 
     let stream = device.build_output_stream(
         config,
@@ -291,9 +318,9 @@ where
             // miss the callback deadline; see `rt::flush_denormals_to_zero`.
             rt::flush_denormals_to_zero();
 
-            while let Ok(app_message) = rx.try_recv() {
-                match app_message {
-                    AppMessage::MidiMessage(midi_message) => match midi_message {
+            while let Ok(command) = rx.try_recv() {
+                match command {
+                    Command::Midi(midi_message) => match midi_message {
                         MidiMessage::NoteOn(note, velocity) => synth.note_on(note, velocity),
                         MidiMessage::NoteOff(note, velocity) => synth.note_off(note, velocity),
                         MidiMessage::ProgramChange(_program) => {}
@@ -301,6 +328,12 @@ where
                             apply_control_change(&mut synth, &mut calibration, controller, value)
                         }
                     },
+                    Command::SetParam { module, param, value } => synth.set_param(module, param, value),
+                    Command::SetOutputCalibration { channel, scale, offset } => {
+                        synth.set_output_calibration(channel, scale, offset)
+                    }
+                    Command::NoteOn { note, velocity } => synth.note_on(note, velocity),
+                    Command::NoteOff { note } => synth.note_off(note, wmidi::Velocity::MIN),
                 }
             }
             process_frame(
@@ -309,7 +342,13 @@ where
                 num_channels,
                 input.as_mut(),
                 &mut external_scratch,
-            )
+            );
+
+            let peak = synth
+                .output_channel(Synth::CHANNEL_AUDIO)
+                .iter()
+                .fold(0.0f32, |m, &s| m.max(s.abs()));
+            meters.update(peak, synth.active_voice_count());
         },
         err_fn,
         None,
@@ -328,7 +367,7 @@ where
 /// channel 0 is the mixed synth audio, 1/2 are pitch/gate CV-out, and
 /// any channel beyond what the synth defines reads as silence — the
 /// old "duplicate mono to every channel" behavior is gone, since
-/// blindly copying a CV signal onto every output would be actively
+/// blindly copying a CV signal onto every channel would be actively
 /// harmful when other channels are wired to real Eurorack gear.
 fn process_frame<SampleType>(
     output: &mut [SampleType],

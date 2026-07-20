@@ -254,6 +254,12 @@ impl Synth {
         );
     }
 
+    /// Number of voices currently sounding (held or still in their release
+    /// tail) — for metering/UI, not used by the engine itself.
+    pub fn active_voice_count(&self) -> u32 {
+        self.voices.iter().filter(|v| v.is_active()).count() as u32
+    }
+
     /// Reads back hardware output `channel`'s block from the most recent
     /// `process_block` call. Channel 0 is the mixed synth audio, 1 is
     /// pitch CV, 2 is gate CV, 3 is silent/spare (see `NUM_MASTER_OUTPUT_CHANNELS`).

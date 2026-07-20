@@ -1,4 +1,4 @@
-use crate::AppMessage;
+use crate::Command;
 use midir::{Ignore, MidiInput, MidiInputConnection};
 use std::error::Error;
 use std::io::{stdin, stdout, Write};
@@ -35,7 +35,7 @@ fn handle_midi_message(bytes: &[u8]) -> Option<MidiMessage> {
         })
 }
 
-pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()>, Box<dyn Error>> {
+pub fn setup_midi(tx: mpsc::Sender<Command>) -> Result<MidiInputConnection<()>, Box<dyn Error>> {
     let mut midi_in = MidiInput::new("midir reading input")?;
     midi_in.ignore(Ignore::None);
 
@@ -72,7 +72,7 @@ pub fn setup_midi(tx: mpsc::Sender<AppMessage>) -> Result<MidiInputConnection<()
         "midir-read-input",
         move |_, bytes, _| {
             if let Some(midi_message) = handle_midi_message(bytes) {
-                let _ = tx.send(AppMessage::MidiMessage(midi_message));
+                let _ = tx.send(Command::Midi(midi_message));
             }
         },
         (),

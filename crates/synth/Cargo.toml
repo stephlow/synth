@@ -1,0 +1,9 @@
+[package]
+name = "synth"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[dependencies]
+wmidi = "4.0.10"
+midir = "0.10.0"

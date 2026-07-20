@@ -1,0 +1,21 @@
+[package]
+name = "console"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "console"
+path = "src/main.rs"
+
+[dependencies]
+synth-proto = { path = "../proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+tonic = "0.12"
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+futures = "0.3"
+anyhow = "1.0.86"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"

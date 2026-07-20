@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+package synth;
+
+// Control surface + live metering for a running `engine` process. See
+// `engine`'s SynthService impl for the server side and `console` for the
+// TUI client.
+service Synth {
+  // Change a single module parameter (e.g. filter cutoff).
+  rpc SetParam(SetParamRequest) returns (Empty);
+
+  // Calibrate a hardware output channel (scale/offset), see
+  // synth::Synth::set_output_calibration.
+  rpc SetOutputCalibration(CalibrationRequest) returns (Empty);
+
+  // Play/stop a note without needing MIDI hardware attached to the engine.
+  rpc NoteOn(NoteOnRequest) returns (Empty);
+  rpc NoteOff(NoteOffRequest) returns (Empty);
+
+  // The fixed set of controls this engine exposes, so a generic client can
+  // render knobs without hardcoding module/param indices itself.
+  rpc ListControls(Empty) returns (ControlList);
+
+  // Live engine state (active voices, output level), pushed periodically.
+  rpc StreamState(Empty) returns (stream EngineState);
+}
+
+message Empty {}
+
+message SetParamRequest {
+  uint32 module = 1;
+  uint32 param = 2;
+  float value = 3;
+}
+
+message CalibrationRequest {
+  uint32 channel = 1;
+  float scale = 2;
+  float offset = 3;
+}
+
+message NoteOnRequest {
+  uint32 note = 1;     // MIDI note number, 0..127
+  uint32 velocity = 2; // MIDI velocity, 1..127
+}
+
+message NoteOffRequest {
+  uint32 note = 1;
+}
+
+// A single control the engine exposes, e.g. "Filter Cutoff" -> module 5,
+// param 0, range 20..10000, default 1200.
+message ControlDescriptor {
+  string name = 1;
+  uint32 module = 2;
+  uint32 param = 3;
+  float min = 4;
+  float max = 5;
+  float default_value = 6;
+  // Display name of the module this control belongs to (e.g. "Filter"),
+  // shared by every control on the same module index — a client groups
+  // controls into one panel per distinct module_name/module.
+  string module_name = 7;
+  // Module type key (e.g. "vcf", "lfo", "envelope", "attenuverter"), so a
+  // client can pick a fitting control style per module kind without
+  // hardcoding module indices.
+  string module_kind = 8;
+}
+
+message ControlList {
+  repeated ControlDescriptor controls = 1;
+}
+
+message EngineState {
+  uint32 active_voices = 1;
+  float output_peak = 2;
+}

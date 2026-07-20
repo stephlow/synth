@@ -1,12 +1,13 @@
-[package]
-name = "synth"
+[workspace]
+resolver = "2"
+members = [
+    "crates/synth",
+    "crates/proto",
+    "crates/engine",
+    "crates/console",
+]
+
+[workspace.package]
 version = "0.2.0"
 authors = ["Stephan Lagerwaard <stephanlagerwaard@gmail.com>"]
 edition = "2021"
-
-[dependencies]
-anyhow = "1.0.86"
-cpal = "0.15.3"
-midir = "0.10.0"
-rtrb = "0.3.1"
-wmidi = "4.0.10"
