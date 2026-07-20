@@ -74,4 +74,9 @@ message ControlList {
 message EngineState {
   uint32 active_voices = 1;
   float output_peak = 2;
+  // Most recent block of the mixed audio output (one sample per entry),
+  // for a live oscilloscope view. Length is the block size of the last
+  // rendered block (<= MAX_BLOCK_FRAMES), and it may be empty when no
+  // audio has been rendered yet.
+  repeated float waveform = 3;
 }

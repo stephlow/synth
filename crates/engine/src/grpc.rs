@@ -134,6 +134,7 @@ impl SynthRpc for SynthService {
                 let state = EngineState {
                     active_voices: meters.active_voices(),
                     output_peak: meters.output_peak(),
+                    waveform: meters.waveform(),
                 };
                 if tx.send(Ok(state)).await.is_err() {
                     info!("stream_state: client disconnected");

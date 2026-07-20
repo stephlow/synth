@@ -40,6 +40,14 @@ pub struct EngineMeters {
     /// output (channel 0), stored as `f32::to_bits`.
     output_peak_bits: std::sync::atomic::AtomicU32,
     active_voices: std::sync::atomic::AtomicU32,
+    /// Most recent block of the mixed audio output, for a live oscilloscope
+    /// view (see the `rack` TUI's scope panel). A `Mutex` (not an atomic)
+    /// because it's a whole buffer, not a scalar; the audio-thread writer
+    /// uses `try_lock` so it never blocks — under contention it simply
+    /// drops a frame, which is harmless for a 30 Hz visual — and the
+    /// reader (the gRPC stream task) is off the audio thread, where the
+    /// occasional `clone` allocation is fine.
+    waveform: std::sync::Mutex<Vec<f32>>,
 }
 
 impl Default for EngineMeters {
@@ -47,6 +55,7 @@ impl Default for EngineMeters {
         Self {
             output_peak_bits: std::sync::atomic::AtomicU32::new(0.0f32.to_bits()),
             active_voices: std::sync::atomic::AtomicU32::new(0),
+            waveform: std::sync::Mutex::new(Vec::with_capacity(MAX_BLOCK_FRAMES)),
         }
     }
 }
@@ -59,6 +68,32 @@ impl EngineMeters {
         self.active_voices
             .store(active_voices, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Publishes the most recent block's mixed-output samples for the scope
+    /// view. Wait-free on the audio thread: `try_lock` never blocks, and
+    /// `copy_from_slice` writes into a preallocated buffer (no growth, no
+    /// allocation). Returns `false` if the lock was contended (the
+    /// outstanding frame is simply skipped).
+    pub fn publish_waveform(&self, samples: &[f32]) -> bool {
+        match self.waveform.try_lock() {
+            Ok(mut buf) => {
+                buf.clear();
+                buf.extend_from_slice(samples);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Reads back the most recently published waveform (a copy — the caller
+    /// is off the audio thread, so the allocation here is fine).
+    pub fn waveform(&self) -> Vec<f32> {
+        self.waveform
+            .lock()
+            .map(|buf| buf.clone())
+            .unwrap_or_default()
+    }
+
 
     pub fn output_peak(&self) -> f32 {
         f32::from_bits(self.output_peak_bits.load(std::sync::atomic::Ordering::Relaxed))

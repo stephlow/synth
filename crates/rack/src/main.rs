@@ -14,7 +14,7 @@ use crossterm::ExecutableCommand;
 use futures::{FutureExt, StreamExt};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
 use synth_proto::synth_client::SynthClient;
@@ -116,6 +116,8 @@ struct App {
     selected: usize,
     active_voices: u32,
     output_peak: f32,
+    /// Most recent block of the mixed output, for the oscilloscope panel.
+    scope: Vec<f32>,
     held_notes: HashSet<u8>,
     quit: bool,
     state_stream_ended: bool,
@@ -132,6 +134,7 @@ impl App {
             selected: 0,
             active_voices: 0,
             output_peak: 0.0,
+            scope: Vec::new(),
             held_notes: HashSet::new(),
             quit: false,
             state_stream_ended: false,
@@ -249,6 +252,7 @@ async fn main() -> anyhow::Result<()> {
                             trace!(active_voices = state.active_voices, output_peak = state.output_peak, "engine state update");
                             app.active_voices = state.active_voices;
                             app.output_peak = state.output_peak;
+                            app.scope = state.waveform;
                         }
                         Some(Err(err)) => {
                             warn!(%err, "state stream error");
@@ -355,6 +359,7 @@ fn draw(frame: &mut Frame, app: &App) {
 
     draw_meter(frame, app, outer[rows.len()]);
     draw_keyboard(frame, app, outer[rows.len() + 1]);
+    draw_scope(frame, app, outer[rows.len() + 2]);
 }
 
 fn draw_panel(frame: &mut Frame, app: &App, panel: &ModulePanel, area: Rect) {
@@ -459,4 +464,43 @@ fn draw_keyboard(frame: &mut Frame, app: &App, area: Rect) {
             .title("Keyboard \u{2014} \u{2190}/\u{2192} select, -/= adjust, \u{2191}/\u{2193} panel, q quit"),
     );
     frame.render_widget(keyboard, area);
+}
+
+/// A live waveform view of the mixed output: the most recent block of
+/// samples, drawn into a character grid as a single trace. Renders nothing
+/// (just the bordered panel) until the first block arrives.
+fn draw_scope(frame: &mut Frame, app: &App, area: Rect) {
+    let block = Block::default().borders(Borders::ALL).title("Oscilloscope");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let width = inner.width as usize;
+    let height = inner.height as usize;
+    if width == 0 || height == 0 || app.scope.is_empty() {
+        return;
+    }
+
+    // One marker column per cell of width; sample the block evenly so a
+    // wide panel just shows more of the trace.
+    let n = app.scope.len();
+    let markers: Vec<(usize, usize)> = (0..width)
+        .map(|x| {
+            let idx = (x * n) / width;
+            let v = app.scope[idx].clamp(-1.0, 1.0);
+            // Map [-1,1] -> row [height-1 (bottom) .. 0 (top)].
+            let row = (((1.0 - (v * 0.5 + 0.5)) * (height - 1) as f32).round() as usize).min(height - 1);
+            (x, row)
+        })
+        .collect();
+
+    let mut grid = vec![vec![' '; width]; height];
+    for (x, row) in markers {
+        grid[row][x] = '\u{2022}'; // bullet
+    }
+
+    let lines: Vec<Line> = grid
+        .into_iter()
+        .map(|row| Line::from(row.into_iter().collect::<String>()))
+        .collect();
+    frame.render_widget(Paragraph::new(Text::from(lines)), inner);
 }

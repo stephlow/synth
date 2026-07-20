@@ -403,6 +403,7 @@ where
                 .iter()
                 .fold(0.0f32, |m, &s| m.max(s.abs()));
             meters.update(peak, synth.active_voice_count());
+            meters.publish_waveform(synth.scope_waveform());
         },
         err_fn,
         None,

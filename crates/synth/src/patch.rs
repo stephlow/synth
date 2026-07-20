@@ -1,6 +1,6 @@
 use crate::graph::Graph;
 use crate::module::BlockContext;
-use crate::modules::{Attenuverter, Envelope, Io, Lfo, MidiToCv, Vca, Vcf, Vco};
+use crate::modules::{Attenuverter, Envelope, Io, Lfo, MidiToCv, Oscilloscope, Vca, Vcf, Vco};
 use crate::MAX_BLOCK_FRAMES;
 
 /// Describes one parameter of a module a `Patch` placed in the graph, for
@@ -72,7 +72,8 @@ pub trait Patch {
 ///   Vcf.lowpass ------------------------------> Vca.audio
 ///   AmpEnv.cv --------------------------------> Vca.cv
 ///   MidiToCv.gate -----------------------------> AmpEnv.gate, FilterEnv.gate
-///   tap = Vca.out
+///   Vca.out ------------------------------------> Scope.in
+///   tap = Scope.out
 pub struct DefaultPatch;
 
 impl Patch for DefaultPatch {
@@ -148,6 +149,10 @@ impl Patch for DefaultPatch {
             params: vec![ParamInfo { name: "Level", param: Vca::PARAM_LEVEL, min: 0.0, max: 1.5, default_value: 1.0 }],
         });
 
+        let scope = graph.add_module(Box::new(Oscilloscope::new()));
+        // Not exposed as a control: it's a pass-through probe (see its
+        // doc); its terminal node is the voice's output tap.
+
         graph.connect(midi_to_cv, MidiToCv::OUT_PITCH, vco, Vco::IN_PITCH);
         graph.connect(vco, Vco::OUT_SAW, vcf, Vcf::IN_AUDIO);
         graph.connect(io_in, 0, vcf, Vcf::IN_AUDIO);
@@ -158,8 +163,9 @@ impl Patch for DefaultPatch {
         graph.connect(amp_env, Envelope::OUT_CV, vca, Vca::IN_CV);
         graph.connect(midi_to_cv, MidiToCv::OUT_GATE, amp_env, Envelope::IN_GATE);
         graph.connect(midi_to_cv, MidiToCv::OUT_GATE, filter_env, Envelope::IN_GATE);
+        graph.connect(vca, Vca::OUT_AUDIO, scope, Oscilloscope::IN_AUDIO);
 
-        let output_tap = graph.add_tap(vca, Vca::OUT_AUDIO);
+        let output_tap = graph.add_tap(scope, Oscilloscope::OUT_AUDIO);
 
         // Mild default LFO-to-cutoff depth (in octaves) so filter modulation
         // is present but not overwhelming out of the box.

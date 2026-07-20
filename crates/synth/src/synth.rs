@@ -283,6 +283,13 @@ impl Synth {
         let start = channel * self.last_frames;
         &self.master_out_outputs[start..start + self.last_frames]
     }
+
+    /// Most recent block of the mixed (summed, normalized) audio output —
+    /// what actually reaches the speakers — for a live oscilloscope view
+    /// (see `EngineMeters::publish_waveform` and the `rack` TUI).
+    pub fn scope_waveform(&self) -> &[f32] {
+        &self.mixed[..self.last_frames]
+    }
 }
 
 #[cfg(test)]
