@@ -1,7 +1,9 @@
 use crate::module::{BlockContext, Module};
 use crate::modules::{Io, MidiToCv};
 use crate::patch::{IoEndpoint, ModuleInfo, Patch, PatchError, Voice, IO_DEVICE_DEFAULT};
-use crate::MAX_BLOCK_FRAMES;
+use crate::{
+    LiveSignalBank, MAX_BLOCK_FRAMES, MAX_CABLE_SIGNALS, MAX_MODULE_SIGNALS, MODULE_SIGNAL_WAVE_LEN,
+};
 use wmidi::{Note, Velocity};
 
 const NUM_VOICES: usize = 4;
@@ -81,6 +83,9 @@ pub struct Synth {
     /// `output_channel` how much of `master_out_outputs`' per-channel
     /// stride to expose.
     last_frames: usize,
+
+    /// Live UI meters filled after each `process_block` (no heap growth).
+    live_signals: LiveSignalBank,
 }
 
 impl Synth {
@@ -128,6 +133,7 @@ impl Synth {
             master_out_outputs: [0.0; NUM_MASTER_OUTPUT_CHANNELS * MAX_BLOCK_FRAMES],
             external_input: [[0.0; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
             last_frames: 0,
+            live_signals: LiveSignalBank::default(),
         })
     }
 
@@ -255,6 +261,25 @@ impl Synth {
 
     pub fn save_patch_json(&self) -> Result<String, PatchError> {
         self.patch.to_json()
+    }
+
+    /// Set lattice coordinates for one module. Document-only; no voice rebuild.
+    pub fn set_module_coordinates(
+        &mut self,
+        id: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<(), PatchError> {
+        self.patch.set_module_coordinates(id, x, y)
+    }
+
+    /// Batch-update lattice coordinates and optional canvas. Document-only.
+    pub fn set_coordinates(
+        &mut self,
+        positions: &[(u32, u32, u32)],
+        canvas: Option<crate::patch::PatchCanvas>,
+    ) -> Result<(), PatchError> {
+        self.patch.set_coordinates(positions, canvas)
     }
 
     /// Absolute peak of the most recent block on each external-input
@@ -434,12 +459,93 @@ impl Synth {
             &mut self.master_out_outputs[..NUM_MASTER_OUTPUT_CHANNELS * frames],
             &ctx,
         );
+
+        self.refresh_live_signals(frames);
     }
 
     /// Number of voices currently sounding (held or still in their release
     /// tail) — for metering/UI, not used by the engine itself.
     pub fn active_voice_count(&self) -> u32 {
         self.voices.iter().filter(|v| v.is_active()).count() as u32
+    }
+
+    /// Per-module / per-cable live meters from the most recent block.
+    pub fn live_signals(&self) -> &LiveSignalBank {
+        &self.live_signals
+    }
+
+    /// Fill `live_signals` from voice graph outputs (allocation-free).
+    fn refresh_live_signals(&mut self, frames: usize) {
+        let bank = &mut self.live_signals;
+        bank.module_count = 0;
+        bank.cable_count = 0;
+        if frames == 0 {
+            return;
+        }
+
+        // Modules: peak + decimated waveform of the loudest output port
+        // across all voices (so a VCO patched on square still shows signal).
+        let n_mod = self.patch.modules.len().min(MAX_MODULE_SIGNALS);
+        for i in 0..n_mod {
+            let id = self.patch.modules[i].id;
+            bank.module_ids[i] = id;
+            let mut peak = 0.0f32;
+            let mut best_voice = 0usize;
+            let mut best_port = 0usize;
+            let mut best_peak = 0.0f32;
+            let n_ports = self
+                .voices
+                .first()
+                .map(|v| v.module_output_count(id))
+                .unwrap_or(0)
+                .max(1);
+            for (vi, voice) in self.voices.iter().enumerate() {
+                for port in 0..n_ports {
+                    let samples = voice.module_output(id, port);
+                    let mut vpeak = 0.0f32;
+                    for &s in samples {
+                        vpeak = vpeak.max(s.abs());
+                    }
+                    peak = peak.max(vpeak);
+                    if vpeak >= best_peak {
+                        best_peak = vpeak;
+                        best_voice = vi;
+                        best_port = port;
+                    }
+                }
+            }
+            bank.module_peaks[i] = peak;
+
+            let wave_base = i * MODULE_SIGNAL_WAVE_LEN;
+            let samples = self.voices[best_voice].module_output(id, best_port);
+            if samples.is_empty() {
+                for k in 0..MODULE_SIGNAL_WAVE_LEN {
+                    bank.module_waves[wave_base + k] = 0.0;
+                }
+            } else {
+                for k in 0..MODULE_SIGNAL_WAVE_LEN {
+                    let idx = (k * samples.len()) / MODULE_SIGNAL_WAVE_LEN;
+                    bank.module_waves[wave_base + k] = samples.get(idx).copied().unwrap_or(0.0);
+                }
+            }
+        }
+        bank.module_count = n_mod;
+
+        // Cables: peak of the source module/port across voices.
+        let n_cab = self.patch.cables.len().min(MAX_CABLE_SIGNALS);
+        for i in 0..n_cab {
+            let c = &self.patch.cables[i];
+            bank.cable_ids[i] = c.id;
+            let mut peak = 0.0f32;
+            for voice in &self.voices {
+                let samples = voice.module_output(c.src_module, c.src_port);
+                for &s in samples {
+                    peak = peak.max(s.abs());
+                }
+            }
+            bank.cable_peaks[i] = peak;
+        }
+        bank.cable_count = n_cab;
     }
 
     /// Reads back hardware output `channel`'s block from the most recent
@@ -676,4 +782,31 @@ mod tests {
         // Still produces finite output after load.
         assert!(synth2.output_channel(0).iter().all(|s| s.is_finite()));
     }
+
+    #[test]
+    fn live_signals_nonzero_while_note_held() {
+        let mut synth = Synth::new(48_000.0);
+        synth.note_on(note(60), velocity(100));
+        for _ in 0..20 {
+            synth.process_block(256);
+        }
+        let bank = synth.live_signals();
+        assert!(bank.module_count > 0);
+        let any_peak = bank.module_peaks[..bank.module_count]
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
+        eprintln!("module_count={} max_peak={any_peak}", bank.module_count);
+        for i in 0..bank.module_count.min(8) {
+            eprintln!("  id={} peak={}", bank.module_ids[i], bank.module_peaks[i]);
+        }
+        assert!(any_peak > 0.01, "max module peak {any_peak}");
+        let cab = bank.cable_peaks[..bank.cable_count]
+            .iter()
+            .cloned()
+            .fold(0.0f32, f32::max);
+        eprintln!("cable_count={} max_peak={cab}", bank.cable_count);
+        assert!(cab > 0.01, "max cable peak {cab}");
+    }
+
 }

@@ -314,6 +314,28 @@ impl Graph {
         let start = (self.output_port_base[m] + port) * self.max_frames;
         &self.arena[start..start + self.last_frames]
     }
+
+    /// Most recent block on any module output port (for live meters / UI).
+    /// Empty if the graph is unbuilt, the module/port is invalid, or no
+    /// block has been processed yet.
+    pub fn output_samples(&self, module: usize, port: usize) -> &[f32] {
+        if !self.built || self.last_frames == 0 || module >= self.modules.len() {
+            return &[];
+        }
+        if port >= self.modules[module].output_count() {
+            return &[];
+        }
+        let start = (self.output_port_base[module] + port) * self.max_frames;
+        &self.arena[start..start + self.last_frames]
+    }
+
+    pub fn module_count(&self) -> usize {
+        self.modules.len()
+    }
+
+    pub fn module_output_count(&self, module: usize) -> usize {
+        self.modules.get(module).map(|m| m.output_count()).unwrap_or(0)
+    }
 }
 
 impl Default for Graph {

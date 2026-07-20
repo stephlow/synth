@@ -4,6 +4,7 @@
 //! control thread via `IoControl` — never done on the audio path.
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -14,12 +15,14 @@ use dsp::{
 };
 use synth_proto::synth_server::{Synth as SynthRpc, SynthServer};
 use synth_proto::{
-    AddModuleRequest, AudioDevice, AudioDeviceList, CableDescriptor, CalibrationRequest,
-    ConnectRequest, ControlDescriptor, ControlList, DisconnectRequest, Empty, EngineState,
-    IoChannelMeter, IoEndpointDescriptor, IoEndpointList, LoadPatchRequest, ModuleInstanceDescriptor,
-    ModuleType, ModuleTypeList, NoteOffRequest, NoteOnRequest, ParamTypeDescriptor, PatchRolesDescriptor,
-    PatchSnapshot, PortDescriptor, RemoveModuleRequest, SavePatchResponse, SetIoDeviceRequest,
-    SetParamRequest,
+    AddModuleRequest, AudioDevice, AudioDeviceList, CableDescriptor, CableSignal,
+    CalibrationRequest, ConnectRequest, ControlDescriptor, ControlList, DisconnectRequest, Empty,
+    EngineState, IoChannelMeter, IoEndpointDescriptor, IoEndpointList, LoadPatchRequest,
+    ModuleCoordinates as ProtoModuleCoordinates, ModuleInstanceDescriptor, ModuleSignal,
+    ModuleType, ModuleTypeList, NoteOffRequest, NoteOnRequest, ParamTypeDescriptor,
+    PatchCanvas as ProtoPatchCanvas, PatchRolesDescriptor, PatchSnapshot, PortDescriptor,
+    RemoveModuleRequest, SavePatchResponse, SetCoordinatesRequest, SetIoDeviceRequest,
+    SetModuleCoordinatesRequest, SetParamRequest,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -176,6 +179,10 @@ fn snapshot_from_json(
                 id: m.id,
                 kind: m.kind.clone(),
                 name: m.name.clone(),
+                coordinates: m.coordinates.map(|c| ProtoModuleCoordinates {
+                    x: c.x,
+                    y: c.y,
+                }),
             })
             .collect(),
         roles: Some(PatchRolesDescriptor {
@@ -187,6 +194,10 @@ fn snapshot_from_json(
         }),
         io_endpoints: tables.io_endpoints.clone(),
         document_json: document_json.to_string(),
+        canvas: patch.canvas.map(|c| ProtoPatchCanvas {
+            width: c.width,
+            height: c.height,
+        }),
     })
 }
 
@@ -195,6 +206,8 @@ pub struct SynthService {
     io_tx: Sender<IoControl>,
     meters: Arc<EngineMeters>,
     tables: Arc<RwLock<ControlTables>>,
+    /// Topology revision for control-surface sync (see `EngineState.patch_generation`).
+    patch_generation: Arc<AtomicU64>,
 }
 
 impl SynthService {
@@ -206,6 +219,15 @@ impl SynthService {
     }
 
     fn apply_op(&self, op: PatchOp) -> Result<PatchSnapshot, Status> {
+        // Topology edits bump generation so control surfaces re-fetch.
+        // Coordinates/canvas and pure snapshots do not (layout is document-only;
+        // the client that wrote coords already has them).
+        let bumps_generation = !matches!(
+            op,
+            PatchOp::GetSnapshot
+                | PatchOp::SetModuleCoordinates { .. }
+                | PatchOp::SetCoordinates { .. }
+        );
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.io_tx
             .send(IoControl::ApplyPatchOp {
@@ -218,6 +240,10 @@ impl SynthService {
             .recv_timeout(Duration::from_secs(10))
             .map_err(|_| Status::deadline_exceeded("timed out applying patch operation"))?
             .map_err(Status::failed_precondition)?;
+
+        if bumps_generation {
+            self.patch_generation.fetch_add(1, Ordering::Relaxed);
+        }
 
         // Rebuild descriptor tables from the applied document + probe modules.
         // Controls must include master IO; reconstruct via a temporary synth
@@ -527,6 +553,37 @@ impl SynthRpc for SynthService {
         }))
     }
 
+    async fn set_module_coordinates(
+        &self,
+        request: Request<SetModuleCoordinatesRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let req = request.into_inner();
+        let snap = self.apply_op(PatchOp::SetModuleCoordinates {
+            id: req.module_id,
+            x: req.x,
+            y: req.y,
+        })?;
+        Ok(Response::new(snap))
+    }
+
+    async fn set_coordinates(
+        &self,
+        request: Request<SetCoordinatesRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let req = request.into_inner();
+        let positions: Vec<(u32, u32, u32)> = req
+            .modules
+            .iter()
+            .map(|m| (m.module_id, m.x, m.y))
+            .collect();
+        let canvas = req.canvas.map(|c| dsp::PatchCanvas {
+            width: c.width.max(1),
+            height: c.height.max(1),
+        });
+        let snap = self.apply_op(PatchOp::SetCoordinates { positions, canvas })?;
+        Ok(Response::new(snap))
+    }
+
     type StreamStateStream =
         Pin<Box<dyn futures_core::Stream<Item = Result<EngineState, Status>> + Send>>;
 
@@ -536,6 +593,7 @@ impl SynthRpc for SynthService {
     ) -> Result<Response<Self::StreamStateStream>, Status> {
         info!("stream_state: client subscribed");
         let meters = Arc::clone(&self.meters);
+        let patch_generation = Arc::clone(&self.patch_generation);
         let (tx, rx) = tokio_mpsc::channel(8);
 
         tokio::spawn(async move {
@@ -565,11 +623,31 @@ impl SynthRpc for SynthService {
                     })
                     .collect();
 
+                let module_signals: Vec<ModuleSignal> = meters
+                    .module_signals()
+                    .into_iter()
+                    .map(|m| ModuleSignal {
+                        module_id: m.module_id,
+                        peak: m.peak,
+                        waveform: m.waveform,
+                    })
+                    .collect();
+                let cable_signals: Vec<CableSignal> = meters
+                    .cable_signals()
+                    .into_iter()
+                    .map(|c| CableSignal {
+                        cable_id: c.cable_id,
+                        peak: c.peak,
+                    })
+                    .collect();
                 let state = EngineState {
                     active_voices: meters.active_voices(),
                     output_peak: meters.output_peak(),
                     waveform: meters.waveform(),
                     io_meters,
+                    patch_generation: patch_generation.load(Ordering::Relaxed),
+                    module_signals,
+                    cable_signals,
                 };
                 if tx.send(Ok(state)).await.is_err() {
                     info!("stream_state: client disconnected");
@@ -601,6 +679,7 @@ pub async fn serve(
         io_tx,
         meters,
         tables,
+        patch_generation: Arc::new(AtomicU64::new(0)),
     };
     debug!(addr, "starting gRPC server");
     let result = Server::builder()

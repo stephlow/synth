@@ -1,161 +1,121 @@
-//! Build dumb panel views from `App` (only place in draw that reads App).
+//! Build paint views from `App`.
 
 use crate::app::App;
-use crate::draw::items::{
-    format_add_kind_row, format_device_row, format_display_row, format_note_row, format_param_row,
-    panel_line, AddKindRowView, DeviceRowView, DisplayKind, DisplayRowView, NoteRowView,
-    ParamRowView, focus_mark,
-};
-use crate::draw::panel::{JackFace, ModulePanelView, PanelLine};
-use crate::model::{Item, ModuleId, UiModule};
+use crate::draw::glyph::GlyphKind;
+use crate::draw::lattice::TilePaint;
+use crate::draw::wires::WireView;
+use crate::model::{LatticePos, ModuleId};
 
-pub fn panel_views(app: &App) -> Vec<ModulePanelView> {
-    let pending = app.pending.map(|p| (p.src_module, p.src_port));
-    app.modules
-        .iter()
-        .enumerate()
-        .map(|(i, m)| {
-            let focused_mod = i == app.focus.module;
-            let title = match &m.id {
-                ModuleId::Io(id) => format!("{} · {id}", m.title),
-                _ => m.title.clone(),
-            };
+pub fn tile_paints(app: &App) -> Vec<TilePaint> {
+    let pending_mod = app.pending.map(|p| p.src_module);
+    let moving_idx = app.moving.as_ref().map(|m| m.module_idx);
+    let mut out = Vec::new();
+    for (i, m) in app.modules.iter().enumerate() {
+        let Some(pos) = app.positions.get(i).copied().flatten() else {
+            continue;
+        };
+        let armed = match &m.id {
+            ModuleId::Voice(id) => pending_mod == Some(*id),
+            _ => false,
+        } || moving_idx == Some(i);
 
-            let voice_id = match &m.id {
-                ModuleId::Voice(id) => Some(*id),
-                _ => None,
-            };
+        let glyph = match &m.id {
+            ModuleId::Scope => GlyphKind::Scope,
+            ModuleId::Meter => GlyphKind::Meter,
+            ModuleId::Keyboard => GlyphKind::Keyboard,
+            ModuleId::Io(_) => GlyphKind::Io,
+            _ => GlyphKind::from_module_kind(&m.kind),
+        };
 
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            let mut body = Vec::new();
-            let mut scope_samples = None;
-
-            // Scope: full-panel waveform; skip list body.
-            if matches!(m.id, ModuleId::Scope) {
-                scope_samples = Some(app.scope.clone());
-            } else {
-                for (j, item) in m.items.iter().enumerate() {
-                    let focused = focused_mod && j == app.focus.item;
-                    match item {
-                        Item::Input { port, name } => {
-                            let mid = voice_id.unwrap_or(0);
-                            let peer = app.jack_peer_hint(mid, *port, false);
-                            inputs.push(JackFace {
-                                name: name.clone(),
-                                connected: !peer.is_empty(),
-                                focused,
-                                pending: false,
-                                peer,
-                            });
-                        }
-                        Item::Output { port, name } => {
-                            let mid = voice_id.unwrap_or(0);
-                            let peer = app.jack_peer_hint(mid, *port, true);
-                            let is_pending = pending == Some((mid, *port));
-                            outputs.push(JackFace {
-                                name: name.clone(),
-                                connected: !peer.is_empty(),
-                                focused,
-                                pending: is_pending,
-                                peer,
-                            });
-                        }
-                        other => {
-                            body.push(body_line(app, m, other, focused));
-                        }
-                    }
+        // Live waveform for this module when the engine publishes samples.
+        let live_wave = match &m.id {
+            ModuleId::Voice(id) => app
+                .module_waveform(*id)
+                .map(|w| w.to_vec())
+                .filter(|w| w.iter().any(|s| s.abs() > 1e-5)),
+            ModuleId::Scope => {
+                if app.scope.is_empty() {
+                    None
+                } else {
+                    Some(app.scope.clone())
                 }
             }
+            _ => None,
+        };
+        let use_live = live_wave.is_some()
+            || matches!(m.id, ModuleId::Scope)
+            || matches!(glyph, GlyphKind::Scope);
 
-            let show_jacks = !inputs.is_empty() || !outputs.is_empty();
-
-            ModulePanelView {
-                title,
-                kind: m.kind.clone(),
-                focused: focused_mod,
-                inputs,
-                outputs,
-                body,
-                show_jacks,
-                scope_samples,
-            }
-        })
-        .collect()
+        out.push(TilePaint {
+            pos,
+            label: app.tile_label(i),
+            glyph,
+            intensity: app.module_intensity(i),
+            soft: app.tile_soft(i),
+            armed,
+            use_scope: use_live,
+            live_wave,
+        });
+    }
+    out
 }
 
-fn body_line(app: &App, module: &UiModule, item: &Item, focused: bool) -> PanelLine {
-    let mark = focus_mark(focused);
-    match item {
-        Item::Param { control_index } => {
-            let c = &app.controls[*control_index];
-            let v = app.values[*control_index];
-            let text = format_param_row(ParamRowView {
-                mark,
-                name: &c.name,
-                value: v,
-                min: c.min,
-                max: c.max,
-            });
-            panel_line(text, focused, false)
-        }
-        Item::DeviceCycle { endpoint_id } => {
-            let dev = app
-                .io_meters
-                .iter()
-                .find(|m| m.endpoint_id == *endpoint_id)
-                .map(|m| m.device_name.as_str())
-                .or_else(|| {
-                    app.io_endpoints
-                        .iter()
-                        .find(|e| e.id == *endpoint_id)
-                        .map(|e| e.device_name.as_str())
-                })
-                .unwrap_or("?");
-            let text = format_device_row(DeviceRowView {
-                mark,
-                device_name: dev,
-                max_width: 22,
-            });
-            panel_line(text, focused, false)
-        }
-        Item::AddKind {
-            display_name,
-            kind,
-        } => {
-            let text = format_add_kind_row(AddKindRowView {
-                mark,
-                display_name,
-                kind,
-            });
-            panel_line(text, focused, false)
-        }
-        Item::Note { label, midi } => {
-            let text = format_note_row(NoteRowView {
-                mark,
-                label: *label,
-                midi: *midi,
-                held: app.held_notes.contains(midi),
-            });
-            panel_line(text, focused, false)
-        }
-        Item::Display => {
-            let kind = match module.id {
-                ModuleId::Scope => DisplayKind::Scope {
-                    samples: app.scope.clone(),
-                },
-                ModuleId::Meter => DisplayKind::Meter {
-                    peak: app.output_peak,
-                    voices: app.active_voices,
-                },
-                _ => DisplayKind::Empty,
-            };
-            let text = format_display_row(DisplayRowView { mark, kind });
-            panel_line(text, focused, false)
-        }
-        Item::Input { .. } | Item::Output { .. } => {
-            // handled as jacks
-            panel_line(String::new(), false, false)
+pub fn wire_views(app: &App) -> Vec<WireView> {
+    let mut wires = Vec::new();
+    let hover = app.hover_voice_id();
+    let any_hover = hover.is_some();
+
+    for c in &app.cables {
+        let from = pos_for_voice(app, c.src_module);
+        let to = pos_for_voice(app, c.dst_module);
+        let (Some(from), Some(to)) = (from, to) else {
+            continue;
+        };
+        let is_hover = hover.is_some_and(|h| h == c.src_module || h == c.dst_module);
+        let peak = app.cable_peak(c.id);
+        // 0..1 level for drawing; quiet cables stay dim, hot signal bright.
+        let level = if peak < 0.002 {
+            0.0
+        } else {
+            (peak * 2.5).clamp(0.08, 1.0)
+        };
+        wires.push(WireView {
+            from,
+            to,
+            level,
+            pending: false,
+            hover: is_hover,
+            dimmed: any_hover && !is_hover,
+        });
+    }
+
+    if let Some(p) = app.pending {
+        if let Some(from) = pos_for_voice(app, p.src_module) {
+            if from != app.cursor {
+                // Ghost cable uses live peak of the armed source if available.
+                let level = app
+                    .module_peak(p.src_module)
+                    .max(0.2)
+                    .clamp(0.2, 0.7);
+                wires.push(WireView {
+                    from,
+                    to: app.cursor,
+                    level,
+                    pending: true,
+                    hover: false,
+                    dimmed: false,
+                });
+            }
         }
     }
+
+    wires
+}
+
+fn pos_for_voice(app: &App, voice_id: u32) -> Option<LatticePos> {
+    let idx = app
+        .modules
+        .iter()
+        .position(|m| matches!(&m.id, ModuleId::Voice(id) if *id == voice_id))?;
+    app.positions.get(idx).copied().flatten()
 }

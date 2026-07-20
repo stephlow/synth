@@ -6,7 +6,7 @@ use crate::model::{
     BuildInput, Item, ModuleId, UiModule, MASTER_IO_MODULE, NOTE_KEYS,
 };
 
-/// Build the full rack panel list (voice → IO → utilities → Add).
+/// Build lattice module list (voice → IO → utilities). Add lives on empty cells.
 pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
     let mut ui = Vec::new();
 
@@ -68,9 +68,6 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
                 }
             }
         }
-        items.push(Item::DeviceCycle {
-            endpoint_id: ep.id.clone(),
-        });
         ui.push(UiModule {
             id: ModuleId::Io(ep.id.clone()),
             title: ep.name.clone(),
@@ -101,20 +98,6 @@ pub fn build_ui_modules(input: BuildInput<'_>) -> Vec<UiModule> {
         title: "Keyboard".into(),
         kind: "keyboard".into(),
         items: key_items,
-    });
-
-    let mut add_items = Vec::new();
-    for t in input.module_types {
-        add_items.push(Item::AddKind {
-            kind: t.kind.clone(),
-            display_name: t.display_name.clone(),
-        });
-    }
-    ui.push(UiModule {
-        id: ModuleId::Add,
-        title: "Add".into(),
-        kind: "add".into(),
-        items: add_items,
     });
 
     ui
@@ -196,20 +179,4 @@ pub fn jack_peer_hint(
     }
 }
 
-pub fn cables_on_jack(
-    cables: &[CableDescriptor],
-    module_id: u32,
-    port: u32,
-    is_output: bool,
-) -> Vec<&CableDescriptor> {
-    cables
-        .iter()
-        .filter(|c| {
-            if is_output {
-                c.src_module == module_id && c.src_port == port
-            } else {
-                c.dst_module == module_id && c.dst_port == port
-            }
-        })
-        .collect()
-}
+

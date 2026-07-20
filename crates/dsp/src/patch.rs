@@ -110,6 +110,20 @@ pub struct IoEndpoint {
     pub params: Vec<ParamInfo>,
 }
 
+/// Lattice coordinates for a module on a control surface (ignored by DSP).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModuleCoordinates {
+    pub x: u32,
+    pub y: u32,
+}
+
+/// Preferred control-surface canvas size (cell counts; ignored by DSP).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatchCanvas {
+    pub width: u32,
+    pub height: u32,
+}
+
 /// One module placed in the patch document.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ModuleInstance {
@@ -125,6 +139,9 @@ pub struct ModuleInstance {
     /// For `kind == "io"`: capture channel count (default 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io_capture_channels: Option<usize>,
+    /// Optional lattice position for rack / other UIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coordinates: Option<ModuleCoordinates>,
 }
 
 impl ModuleInstance {
@@ -181,6 +198,9 @@ struct PatchBody {
     cables: Vec<Cable>,
     roles: PatchRoles,
     io_endpoints: Vec<IoEndpoint>,
+    /// Preferred control-surface canvas size (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    canvas: Option<PatchCanvas>,
 }
 
 /// Serializable patch document: topology, params, roles, and IO bindings.
@@ -196,6 +216,8 @@ pub struct Patch {
     pub cables: Vec<Cable>,
     pub roles: PatchRoles,
     pub io_endpoints: Vec<IoEndpoint>,
+    /// Preferred control-surface canvas size (optional).
+    pub canvas: Option<PatchCanvas>,
 }
 
 impl From<PatchFile> for Patch {
@@ -207,6 +229,7 @@ impl From<PatchFile> for Patch {
             cables: f.patch.cables,
             roles: f.patch.roles,
             io_endpoints: f.patch.io_endpoints,
+            canvas: f.patch.canvas,
         }
     }
 }
@@ -222,6 +245,7 @@ impl From<Patch> for PatchFile {
                 cables: p.cables,
                 roles: p.roles,
                 io_endpoints: p.io_endpoints,
+                canvas: p.canvas,
             },
         }
     }
@@ -284,6 +308,7 @@ impl Default for Patch {
                 params: vec![],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: vco,
@@ -292,6 +317,7 @@ impl Default for Patch {
                 params: vec![(Vco::PARAM_TUNE, 0.0)],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: io_in,
@@ -305,6 +331,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: Some(0),
                 io_capture_channels: Some(2),
+                coordinates: None,
             },
             ModuleInstance {
                 id: amp_env,
@@ -318,6 +345,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: filter_env,
@@ -331,6 +359,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: lfo,
@@ -339,6 +368,7 @@ impl Default for Patch {
                 params: vec![(Lfo::PARAM_RATE, 2.0)],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: lfo_depth,
@@ -350,6 +380,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: vcf,
@@ -361,6 +392,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: vca,
@@ -369,6 +401,7 @@ impl Default for Patch {
                 params: vec![(Vca::PARAM_LEVEL, 1.0)],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
             ModuleInstance {
                 id: scope,
@@ -377,6 +410,7 @@ impl Default for Patch {
                 params: vec![],
                 io_send_channels: None,
                 io_capture_channels: None,
+                coordinates: None,
             },
         ];
 
@@ -522,6 +556,7 @@ impl Default for Patch {
                 output_tap_port: Oscilloscope::OUT_AUDIO,
             },
             io_endpoints,
+            canvas: None,
         }
     }
 }
@@ -553,8 +588,43 @@ impl Patch {
             params,
             io_send_channels: io_send,
             io_capture_channels: io_capture,
+            coordinates: None,
         });
         Ok(id)
+    }
+
+    /// Set lattice coordinates for a module (control surface only).
+    pub fn set_module_coordinates(
+        &mut self,
+        id: u32,
+        x: u32,
+        y: u32,
+    ) -> Result<(), PatchError> {
+        let m = self
+            .modules
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or(PatchError::UnknownModule(id))?;
+        m.coordinates = Some(ModuleCoordinates { x, y });
+        Ok(())
+    }
+
+    /// Batch-update module coordinates and optional canvas size.
+    pub fn set_coordinates(
+        &mut self,
+        positions: &[(u32, u32, u32)],
+        canvas: Option<PatchCanvas>,
+    ) -> Result<(), PatchError> {
+        for &(id, x, y) in positions {
+            self.set_module_coordinates(id, x, y)?;
+        }
+        if let Some(c) = canvas {
+            self.canvas = Some(PatchCanvas {
+                width: c.width.max(1),
+                height: c.height.max(1),
+            });
+        }
+        Ok(())
     }
 
     /// Removes a module and all incident cables. Refuses role modules.
@@ -904,6 +974,21 @@ impl Voice {
             .find(|(id, _)| *id == module_id)
             .map(|(_, idx)| *idx)
     }
+
+    /// Live samples on a module output after `process_block` (empty if unknown).
+    pub fn module_output(&self, module_id: u32, port: usize) -> &[f32] {
+        match self.graph_index(module_id) {
+            Some(idx) => self.graph.output_samples(idx, port),
+            None => &[],
+        }
+    }
+
+    pub fn module_output_count(&self, module_id: u32) -> usize {
+        match self.graph_index(module_id) {
+            Some(idx) => self.graph.module_output_count(idx),
+            None => 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -937,6 +1022,32 @@ mod tests {
         assert_eq!(loaded.cables.len(), patch.cables.len());
         assert_eq!(loaded.roles.note_source, patch.roles.note_source);
         assert_eq!(loaded.next_id, patch.next_id);
+    }
+
+    #[test]
+    fn json_round_trip_preserves_coordinates() {
+        let mut patch = Patch::default();
+        let id = patch.modules[1].id;
+        patch
+            .set_module_coordinates(id, 3, 5)
+            .expect("set coords");
+        patch.canvas = Some(PatchCanvas {
+            width: 32,
+            height: 20,
+        });
+        let json = patch.to_json().unwrap();
+        assert!(json.contains("\"coordinates\""));
+        assert!(json.contains("\"x\": 3"));
+        let loaded = Patch::from_json(&json).unwrap();
+        let m = loaded.modules.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(m.coordinates, Some(ModuleCoordinates { x: 3, y: 5 }));
+        assert_eq!(
+            loaded.canvas,
+            Some(PatchCanvas {
+                width: 32,
+                height: 20
+            })
+        );
     }
 
     #[test]

@@ -51,6 +51,10 @@ service Synth {
   // Load/save the patch document as JSON (same format as GetPatch.document_json).
   rpc LoadPatch(LoadPatchRequest) returns (PatchSnapshot);
   rpc SavePatch(Empty) returns (SavePatchResponse);
+
+  // Control-surface lattice layout (ignored by DSP).
+  rpc SetModuleCoordinates(SetModuleCoordinatesRequest) returns (PatchSnapshot);
+  rpc SetCoordinates(SetCoordinatesRequest) returns (PatchSnapshot);
 }
 
 message Empty {}
@@ -140,6 +144,20 @@ message IoChannelMeter {
   bool connected = 4;
 }
 
+// Live signal for one voice-graph module (peak + short waveform).
+message ModuleSignal {
+  uint32 module_id = 1;
+  float peak = 2;
+  // Decimated recent block for tile glyphs (typically ~32 samples).
+  repeated float waveform = 3;
+}
+
+// Live peak for one patch cable (source port absolute peak).
+message CableSignal {
+  uint32 cable_id = 1;
+  float peak = 2;
+}
+
 message EngineState {
   uint32 active_voices = 1;
   float output_peak = 2;
@@ -150,6 +168,14 @@ message EngineState {
   repeated float waveform = 3;
   // Per-endpoint live meters + resolved device status.
   repeated IoChannelMeter io_meters = 4;
+  // Monotonic topology revision. Bumped when the patch document changes
+  // (add/remove/connect/disconnect/load). Control surfaces should
+  // re-fetch `GetPatch` when this differs from their last snapshot.
+  uint64 patch_generation = 5;
+  // Per-module live signals for lattice tiles.
+  repeated ModuleSignal module_signals = 6;
+  // Per-cable live peaks for wire intensity.
+  repeated CableSignal cable_signals = 7;
 }
 
 message PortDescriptor {
@@ -177,10 +203,22 @@ message ModuleTypeList {
   repeated ModuleType types = 1;
 }
 
+message ModuleCoordinates {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message PatchCanvas {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
 message ModuleInstanceDescriptor {
   uint32 id = 1;
   string kind = 2;
   string name = 3;
+  // Optional lattice position; unset when not placed by a control surface.
+  ModuleCoordinates coordinates = 4;
 }
 
 message CableDescriptor {
@@ -207,6 +245,26 @@ message PatchSnapshot {
   repeated IoEndpointDescriptor io_endpoints = 5;
   // Full document JSON for save/file interchange.
   string document_json = 6;
+  // Preferred control-surface canvas size (cell counts).
+  PatchCanvas canvas = 7;
+}
+
+message SetModuleCoordinatesRequest {
+  uint32 module_id = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+}
+
+message ModuleCoordinatesEntry {
+  uint32 module_id = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+}
+
+message SetCoordinatesRequest {
+  repeated ModuleCoordinatesEntry modules = 1;
+  // When set, updates the patch canvas size.
+  PatchCanvas canvas = 2;
 }
 
 message AddModuleRequest {

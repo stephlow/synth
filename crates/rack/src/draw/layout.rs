@@ -1,355 +1,168 @@
-//! Pure grid geometry: responsive panel size + viewport pagination.
+//! Responsive lattice geometry: scales tile/gutter with canvas size.
 
 use ratatui::layout::Rect;
 
-use crate::draw::panel::{panel_height, ModulePanelView};
-use crate::model::{PANEL_GAP_MAX, PANEL_GAP_MIN, PANEL_WIDTH_MAX, PANEL_WIDTH_MIN};
+use crate::model::LatticePos;
 
-/// Result of packing modules into the available terminal region.
-#[derive(Clone, Debug)]
-pub struct GridLayout {
-    pub panel_w: u16,
-    pub gap: u16,
-    pub cols: usize,
-    /// Inclusive start, exclusive end into the panels slice.
-    pub visible_start: usize,
-    pub visible_end: usize,
-    pub page: usize,
-    pub pages: usize,
-    pub total: usize,
+/// Per-frame geometry derived from the lattice canvas.
+#[derive(Clone, Copy, Debug)]
+pub struct Geom {
+    pub tile_w: u16,
+    pub tile_h: u16,
+    pub gutter_x: u16,
+    pub gutter_y: u16,
 }
 
-impl GridLayout {
-    pub fn visible_range(&self) -> std::ops::Range<usize> {
-        self.visible_start..self.visible_end
-    }
+impl Geom {
+    /// Scale tiles and gutters from available canvas size.
+    ///
+    /// Sized so kind-specific glyphs (sine/tri waves, ADSR, filter curves)
+    /// get a real interior: after top micro-label + box borders, prefer
+    /// roughly 9×3+ cells for the paint surface on a normal terminal.
+    pub fn from_canvas(canvas: Rect) -> Self {
+        let w = canvas.width;
+        let h = canvas.height;
 
-    pub fn visible_count(&self) -> usize {
-        self.visible_end.saturating_sub(self.visible_start)
-    }
-}
-
-/// Compute columns and panel width for `area` (grid paint region only).
-pub fn compute_geometry(area: Rect) -> (u16, u16, usize) {
-    let margin = 2u16; // left+right outer margin total
-    let usable = area.width.saturating_sub(margin).max(PANEL_WIDTH_MIN);
-
-    // Start with min width to see how many columns fit.
-    let mut gap = PANEL_GAP_MIN;
-    let mut cols = (usable / (PANEL_WIDTH_MIN + gap)).max(1) as usize;
-
-    // Prefer slightly fewer columns and wider panels when we have room.
-    if usable >= (PANEL_WIDTH_MIN + gap) * 3 + 8 {
-        // leave room for gaps between
-        cols = cols.min(3);
-    }
-    if usable < PANEL_WIDTH_MIN * 2 + gap {
-        cols = 1;
-    }
-
-    // Distribute width: panel_w * cols + gap * (cols+1) ≈ usable
-    // (gaps as side margins + between)
-    let gaps = (cols as u16).saturating_add(1);
-    let mut panel_w = usable
-        .saturating_sub(gap * gaps)
-        .checked_div(cols as u16)
-        .unwrap_or(PANEL_WIDTH_MIN)
-        .clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX);
-
-    // Recompute gap from leftover so spacing is even.
-    let used_panels = panel_w * cols as u16;
-    let leftover = usable.saturating_sub(used_panels);
-    gap = (leftover / gaps).clamp(PANEL_GAP_MIN, PANEL_GAP_MAX);
-
-    // If leftover is large, grow panels toward max.
-    let leftover2 = usable.saturating_sub(panel_w * cols as u16 + gap * gaps);
-    if leftover2 > 0 && panel_w < PANEL_WIDTH_MAX {
-        let grow = (leftover2 / cols as u16).min(PANEL_WIDTH_MAX - panel_w);
-        panel_w += grow;
-    }
-
-    // Final cols re-check for very wide: allow 4 if each still ≥ min
-    let max_cols = (usable / (PANEL_WIDTH_MIN + PANEL_GAP_MIN)).max(1) as usize;
-    cols = cols.min(max_cols).max(1);
-
-    (panel_w, gap, cols)
-}
-
-/// How many modules fit starting at `origin`, given heights.
-pub fn compute_grid(
-    area: Rect,
-    panels: &[ModulePanelView],
-    origin: usize,
-) -> GridLayout {
-    let total = panels.len();
-    if total == 0 || area.height == 0 || area.width == 0 {
-        return GridLayout {
-            panel_w: PANEL_WIDTH_MIN,
-            gap: PANEL_GAP_MIN,
-            cols: 1,
-            visible_start: 0,
-            visible_end: 0,
-            page: 0,
-            pages: 1,
-            total: 0,
+        // Outer tile width (chars). Inner glyph ≈ width − 2 borders.
+        let tile_w = match w {
+            0..=40 => 7,
+            41..=70 => 9,
+            71..=100 => 11,
+            101..=140 => 13,
+            _ => 15,
         };
-    }
 
-    let (panel_w, gap, cols) = compute_geometry(area);
-    let origin = origin.min(total.saturating_sub(1));
+        // Outer tile height (rows). Budget: 1 label + 2 borders + glyph rows.
+        // Want ≥3 glyph rows on normal screens → outer ≥ 6.
+        let tile_h = match h {
+            0..=12 => 4,
+            13..=20 => 5,
+            21..=30 => 6,
+            31..=42 => 7,
+            _ => 8,
+        };
 
-    // Pack rows from origin until height exhausted.
-    let mut end = origin;
-    let mut y_used = 0u16;
-    let max_h = area.height;
+        // Gutters: wire lanes between large tiles.
+        let gutter_x = match w {
+            0..=50 => 2,
+            51..=90 => 3,
+            91..=130 => 4,
+            _ => 5,
+        };
+        let gutter_y = match h {
+            0..=18 => 1,
+            19..=32 => 1,
+            _ => 2,
+        };
 
-    while end < total {
-        let row_end = (end + cols).min(total);
-        let row_h = panels[end..row_end]
-            .iter()
-            .map(panel_height)
-            .max()
-            .unwrap_or(6)
-            .min(max_h)
-            .saturating_add(gap);
-
-        if end > origin && y_used.saturating_add(row_h) > max_h {
-            break;
+        Self {
+            tile_w,
+            tile_h,
+            gutter_x,
+            gutter_y,
         }
-        // Always take at least one row even if tall.
-        y_used = y_used.saturating_add(row_h);
-        end = row_end;
-        if y_used >= max_h {
-            break;
-        }
     }
 
-    if end == origin {
-        end = (origin + 1).min(total);
+    pub fn cell_step_x(self) -> u16 {
+        self.tile_w.saturating_add(self.gutter_x).max(1)
     }
 
-    // Page count: greedy pack from 0.
-    let pages = count_pages(panels, cols, gap, max_h).max(1);
-    let page = page_index_for_origin(panels, cols, gap, max_h, origin).min(pages - 1);
+    pub fn cell_step_y(self) -> u16 {
+        self.tile_h.saturating_add(self.gutter_y).max(1)
+    }
 
-    GridLayout {
-        panel_w,
-        gap,
-        cols,
-        visible_start: origin,
-        visible_end: end,
-        page,
-        pages,
-        total,
+    /// How many lattice cells fit fully in the canvas.
+    pub fn visible_span(self, canvas: Rect) -> (u16, u16) {
+        let cols = (canvas.width / self.cell_step_x()).max(1);
+        let rows = (canvas.height / self.cell_step_y()).max(1);
+        (cols, rows)
     }
 }
 
-fn count_pages(panels: &[ModulePanelView], cols: usize, gap: u16, max_h: u16) -> usize {
-    if panels.is_empty() {
-        return 1;
+/// Lattice paint area from full terminal (responsive chrome heights).
+pub fn chrome_heights(term_h: u16) -> (u16, u16) {
+    // (banner, status)
+    if term_h < 12 {
+        (1, 2)
+    } else if term_h < 18 {
+        (2, 2)
+    } else {
+        (2, 3)
     }
-    let mut pages = 0;
-    let mut i = 0;
-    while i < panels.len() {
-        let mut y = 0u16;
-        let start = i;
-        while i < panels.len() {
-            let row_end = (i + cols).min(panels.len());
-            let row_h = panels[i..row_end]
-                .iter()
-                .map(panel_height)
-                .max()
-                .unwrap_or(6)
-                .min(max_h)
-                .saturating_add(gap);
-            if i > start && y.saturating_add(row_h) > max_h {
-                break;
-            }
-            y = y.saturating_add(row_h);
-            i = row_end;
-            if y >= max_h {
-                break;
-            }
-        }
-        if i == start {
-            i += 1;
-        }
-        pages += 1;
-    }
-    pages.max(1)
 }
 
-fn page_index_for_origin(
-    panels: &[ModulePanelView],
-    cols: usize,
-    gap: u16,
-    max_h: u16,
-    origin: usize,
-) -> usize {
-    if panels.is_empty() {
-        return 0;
-    }
-    let mut page = 0;
-    let mut i = 0;
-    while i < panels.len() {
-        if i == origin {
-            return page;
-        }
-        let start = i;
-        let mut y = 0u16;
-        while i < panels.len() {
-            let row_end = (i + cols).min(panels.len());
-            let row_h = panels[i..row_end]
-                .iter()
-                .map(panel_height)
-                .max()
-                .unwrap_or(6)
-                .min(max_h)
-                .saturating_add(gap);
-            if i > start && y.saturating_add(row_h) > max_h {
-                break;
-            }
-            y = y.saturating_add(row_h);
-            i = row_end;
-            if y >= max_h {
-                break;
-            }
-        }
-        if i == start {
-            i += 1;
-        }
-        if origin < i {
-            return page;
-        }
-        page += 1;
-    }
-    page.saturating_sub(1)
-}
-
-/// Advance origin by one page (±1). Returns new origin.
-pub fn page_origin(
-    panels: &[ModulePanelView],
-    area: Rect,
-    origin: usize,
-    delta: isize,
-) -> usize {
-    if panels.is_empty() {
-        return 0;
-    }
-    let (panel_w, gap, cols) = compute_geometry(area);
-    let _ = panel_w;
-    let max_h = area.height;
-
-    // Collect page starts
-    let mut starts = Vec::new();
-    let mut i = 0;
-    while i < panels.len() {
-        starts.push(i);
-        let start = i;
-        let mut y = 0u16;
-        while i < panels.len() {
-            let row_end = (i + cols).min(panels.len());
-            let row_h = panels[i..row_end]
-                .iter()
-                .map(panel_height)
-                .max()
-                .unwrap_or(6)
-                .min(max_h)
-                .saturating_add(gap);
-            if i > start && y.saturating_add(row_h) > max_h {
-                break;
-            }
-            y = y.saturating_add(row_h);
-            i = row_end;
-            if y >= max_h {
-                break;
-            }
-        }
-        if i == start {
-            i += 1;
-        }
-    }
-
-    if starts.is_empty() {
-        return 0;
-    }
-
-    // Current page = largest start <= origin
-    let mut cur = 0;
-    for (pi, &s) in starts.iter().enumerate() {
-        if s <= origin {
-            cur = pi;
-        }
-    }
-    let next = (cur as isize + delta).clamp(0, starts.len() as isize - 1) as usize;
-    starts[next]
-}
-
-/// Shift origin so `focus` is within the visible window.
-pub fn origin_for_focus(
-    panels: &[ModulePanelView],
-    area: Rect,
-    focus: usize,
-    current_origin: usize,
-) -> usize {
-    if panels.is_empty() {
-        return 0;
-    }
-    let focus = focus.min(panels.len() - 1);
-    let layout = compute_grid(area, panels, current_origin);
-    if focus >= layout.visible_start && focus < layout.visible_end {
-        return current_origin;
-    }
-    // If focus is before window, set origin so focus is first on a page containing it.
-    // Walk page starts and pick the page that contains focus.
-    let (panel_w, gap, cols) = compute_geometry(area);
-    let _ = panel_w;
-    let max_h = area.height;
-    let mut i = 0;
-    let mut best = 0;
-    while i < panels.len() {
-        let start = i;
-        let mut y = 0u16;
-        while i < panels.len() {
-            let row_end = (i + cols).min(panels.len());
-            let row_h = panels[i..row_end]
-                .iter()
-                .map(panel_height)
-                .max()
-                .unwrap_or(6)
-                .min(max_h)
-                .saturating_add(gap);
-            if i > start && y.saturating_add(row_h) > max_h {
-                break;
-            }
-            y = y.saturating_add(row_h);
-            i = row_end;
-            if y >= max_h {
-                break;
-            }
-        }
-        if i == start {
-            i += 1;
-        }
-        if focus >= start && focus < i {
-            return start;
-        }
-        if focus >= start {
-            best = start;
-        }
-    }
-    best
-}
-
-/// Grid area from full terminal size (banner 2 + status 3).
 pub fn grid_area_from_term(width: u16, height: u16) -> Rect {
-    let banner = 2u16;
-    let status = 3u16;
+    let (banner, status) = chrome_heights(height);
     let h = height.saturating_sub(banner + status).max(1);
     Rect {
         x: 0,
         y: banner,
         width,
+        height: h,
+    }
+}
+
+/// Character origin of lattice cell relative to canvas.
+pub fn cell_origin(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> (u16, u16) {
+    let dx = pos.x.saturating_sub(view.x);
+    let dy = pos.y.saturating_sub(view.y);
+    let x = canvas.x.saturating_add(dx.saturating_mul(geom.cell_step_x()));
+    let y = canvas.y.saturating_add(dy.saturating_mul(geom.cell_step_y()));
+    (x, y)
+}
+
+/// Tile rect for a lattice cell (clipped to canvas).
+pub fn tile_rect(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> Option<Rect> {
+    let (x, y) = cell_origin(pos, view, canvas, geom);
+    if x >= canvas.x + canvas.width || y >= canvas.y + canvas.height {
+        return None;
+    }
+    let w = geom.tile_w.min(canvas.x + canvas.width - x);
+    let h = geom.tile_h.min(canvas.y + canvas.height - y);
+    // Need enough room for a bordered glyph (not just a 2×2 stub).
+    if w < 5 || h < 3 {
+        return None;
+    }
+    Some(Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    })
+}
+
+pub fn tile_out_port(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> Option<(u16, u16)> {
+    let r = tile_rect(pos, view, canvas, geom)?;
+    Some((r.x + r.width.saturating_sub(1), r.y + r.height / 2))
+}
+
+pub fn tile_in_port(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> Option<(u16, u16)> {
+    let r = tile_rect(pos, view, canvas, geom)?;
+    Some((r.x, r.y + r.height / 2))
+}
+
+pub fn cursor_rect(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> Option<Rect> {
+    tile_rect(pos, view, canvas, geom)
+}
+
+/// Menu panel: scale with canvas; prefer center.
+pub fn menu_rect(canvas: Rect, content_rows: u16, content_cols: u16) -> Rect {
+    let max_w = canvas.width.saturating_sub(2).max(12);
+    let max_h = canvas.height.saturating_sub(1).max(3);
+    // Prefer up to ~70% width on large terms, full-ish on small.
+    let prefer_w = if canvas.width < 40 {
+        max_w
+    } else {
+        (canvas.width * 7 / 10).clamp(20, max_w)
+    };
+    let w = content_cols.min(prefer_w).max(12).min(max_w);
+    let h = content_rows.min(max_h).max(3);
+    let x = canvas.x + canvas.width.saturating_sub(w) / 2;
+    let y = canvas.y + canvas.height.saturating_sub(h) / 2;
+    Rect {
+        x,
+        y,
+        width: w,
         height: h,
     }
 }

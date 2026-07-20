@@ -1,77 +1,116 @@
-//! Keyboard handling and engine RPCs.
+//! Keyboard handling and engine RPCs — mode-dispatched.
 
 use crossterm::event::KeyCode;
 use synth_proto::synth_client::SynthClient;
 use synth_proto::{
-    AddModuleRequest, ConnectRequest, DisconnectRequest, Empty, LoadPatchRequest, NoteOffRequest,
-    NoteOnRequest, RemoveModuleRequest, SetIoDeviceRequest, SetParamRequest,
+    AddModuleRequest, ConnectRequest, DisconnectRequest, Empty, LoadPatchRequest,
+    ModuleCoordinatesEntry, NoteOffRequest, NoteOnRequest, PatchCanvas, RemoveModuleRequest,
+    SetCoordinatesRequest, SetIoDeviceRequest, SetParamRequest,
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::app::App;
-use crate::model::{Item, ModuleId, PendingCable, DEFAULT_PATCH_FILE, NOTE_KEYS};
+use crate::menu_build;
+use crate::model::{MenuAction, ModuleId, PendingCable, DEFAULT_PATCH_FILE, NOTE_KEYS};
 
 pub async fn handle_key(
     app: &mut App,
     client: &mut SynthClient<tonic::transport::Channel>,
     code: KeyCode,
 ) {
-    trace!(?code, "key");
+    // Always quit.
+    if matches!(code, KeyCode::Char('q')) {
+        app.quit = true;
+        return;
+    }
 
+    if app.moving.is_some() {
+        handle_move(app, client, code).await;
+        return;
+    }
+
+    if app.param_edit.is_some() {
+        handle_param_edit(app, client, code).await;
+        return;
+    }
+
+    if !app.menu_stack.is_empty() {
+        handle_menu(app, client, code).await;
+        return;
+    }
+
+    handle_lattice(app, client, code).await;
+}
+
+async fn handle_move(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    code: KeyCode,
+) {
     match code {
-        KeyCode::Char('q') => {
-            app.quit = true;
+        KeyCode::Esc => app.cancel_move(),
+        KeyCode::Enter => {
+            app.confirm_move();
+            flush_coordinates(app, client).await;
         }
+        KeyCode::Left | KeyCode::Char('h') => app.move_cursor(-1, 0),
+        KeyCode::Right | KeyCode::Char('l') => app.move_cursor(1, 0),
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor(0, -1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor(0, 1),
+        _ => {}
+    }
+}
+
+/// Persist voice lattice coordinates + canvas size into the patch document.
+async fn flush_coordinates(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+) {
+    let modules: Vec<ModuleCoordinatesEntry> = app
+        .voice_coordinate_entries()
+        .into_iter()
+        .map(|(module_id, x, y)| ModuleCoordinatesEntry { module_id, x, y })
+        .collect();
+    let canvas = Some(PatchCanvas {
+        width: u32::from(app.grid_cols),
+        height: u32::from(app.grid_rows),
+    });
+    app.patch_canvas = Some((app.grid_cols, app.grid_rows));
+    match client
+        .set_coordinates(SetCoordinatesRequest { modules, canvas })
+        .await
+    {
+        Ok(_) => {
+            // Document-only; generation is not bumped — keep local placements.
+            debug!("coordinates flushed to engine");
+        }
+        Err(err) => {
+            warn!(%err, "failed to flush coordinates");
+            app.status = format!("coords save failed: {err}");
+        }
+    }
+}
+
+async fn handle_lattice(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    code: KeyCode,
+) {
+    match code {
         KeyCode::Esc => {
             app.pending = None;
             app.status = "pending cable cleared".into();
         }
-        KeyCode::Char('?') => app.cycle_hint(),
-        KeyCode::Char('h') | KeyCode::Left => app.focus_module_delta(-1),
-        KeyCode::Char('l') | KeyCode::Right => app.focus_module_delta(1),
-        KeyCode::Char('k') | KeyCode::Up => app.focus_item_delta(-1),
-        KeyCode::Char('j') | KeyCode::Down => app.focus_item_delta(1),
-        KeyCode::PageDown | KeyCode::Char(']') => app.page_delta(1),
-        KeyCode::PageUp | KeyCode::Char('[') => app.page_delta(-1),
-        KeyCode::Char('S') => save_patch(app, client).await,
-        KeyCode::Char('L') => load_patch(app, client).await,
-        KeyCode::Char('D') => delete_focused_voice(app, client).await,
-        KeyCode::Char('-') | KeyCode::Char('_') => {
-            let fine = matches!(code, KeyCode::Char('_'));
-            if let Some(Item::Param { control_index }) = app.focused_item().cloned() {
-                if let Some((module, param, value)) = app.adjust_param(control_index, -1.0, fine) {
-                    let _ = client
-                        .set_param(SetParamRequest {
-                            module,
-                            param,
-                            value,
-                        })
-                        .await;
-                    app.refresh_status();
-                }
-            } else {
-                app.status = "focus a param to adjust".into();
-            }
+        // Navigation only — actions go through Enter → menu.
+        KeyCode::Left | KeyCode::Char('h') => app.move_cursor(-1, 0),
+        KeyCode::Right | KeyCode::Char('l') => app.move_cursor(1, 0),
+        KeyCode::Up | KeyCode::Char('k') => app.move_cursor(0, -1),
+        KeyCode::Down | KeyCode::Char('j') => app.move_cursor(0, 1),
+        KeyCode::Enter => {
+            let menu = menu_build::root_menu(app);
+            app.push_menu(menu);
         }
-        KeyCode::Char('=') | KeyCode::Char('+') => {
-            let fine = matches!(code, KeyCode::Char('+'));
-            if let Some(Item::Param { control_index }) = app.focused_item().cloned() {
-                if let Some((module, param, value)) = app.adjust_param(control_index, 1.0, fine) {
-                    let _ = client
-                        .set_param(SetParamRequest {
-                            module,
-                            param,
-                            value,
-                        })
-                        .await;
-                    app.refresh_status();
-                }
-            } else {
-                app.status = "focus a param to adjust".into();
-            }
-        }
-        KeyCode::Enter => on_enter(app, client).await,
-        KeyCode::Char('x') => disconnect_focused_jack(app, client).await,
+        // Performance keys (not menu actions) — live notes while patching.
         KeyCode::Char(ch) => {
             if let Some(&(_, note)) = NOTE_KEYS.iter().find(|(k, _)| *k == ch) {
                 toggle_note(app, client, note).await;
@@ -81,80 +120,173 @@ pub async fn handle_key(
     }
 }
 
-async fn on_enter(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>) {
-    let item = app.focused_item().cloned();
-    let voice_id = app.focused_voice_id();
+async fn handle_menu(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    code: KeyCode,
+) {
+    match code {
+        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+            app.pop_menu();
+        }
+        KeyCode::Up | KeyCode::Char('k') => app.menu_selected_delta(-1),
+        KeyCode::Down | KeyCode::Char('j') => app.menu_selected_delta(1),
+        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+            activate_menu_item(app, client).await;
+        }
+        _ => {}
+    }
+}
 
-    match item {
-        Some(Item::Output { port, name }) => {
-            if let Some(mid) = voice_id {
-                app.pending = Some(PendingCable {
-                    src_module: mid,
-                    src_port: port,
-                });
-                app.status = format!(
-                    "armed {}.{} — focus an input jack, Enter",
-                    app.module_short(mid),
-                    name
-                );
+async fn handle_param_edit(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+    code: KeyCode,
+) {
+    let Some(ci) = app.param_edit else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => {
+            app.param_edit = None;
+            app.refresh_status();
+        }
+        KeyCode::Enter => {
+            app.param_edit = None;
+            app.refresh_status();
+        }
+        KeyCode::Char('-') | KeyCode::Char('_') => {
+            let fine = matches!(code, KeyCode::Char('_'));
+            if let Some((module, param, value)) = app.adjust_param(ci, -1.0, fine) {
+                let _ = client
+                    .set_param(SetParamRequest {
+                        module,
+                        param,
+                        value,
+                    })
+                    .await;
+                app.refresh_status();
             }
         }
-        Some(Item::Input { port, name }) => {
-            let Some(pending) = app.pending else {
-                app.status = "arm an output jack first (focus out, Enter)".into();
-                return;
-            };
-            let Some(dst) = voice_id else {
-                app.status = "focus a voice module input".into();
-                return;
-            };
+        KeyCode::Char('=') | KeyCode::Char('+') => {
+            let fine = matches!(code, KeyCode::Char('+'));
+            if let Some((module, param, value)) = app.adjust_param(ci, 1.0, fine) {
+                let _ = client
+                    .set_param(SetParamRequest {
+                        module,
+                        param,
+                        value,
+                    })
+                    .await;
+                app.refresh_status();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(next) = app.sibling_param(ci, -1) {
+                app.param_edit = Some(next);
+                app.refresh_status();
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if let Some(next) = app.sibling_param(ci, 1) {
+                app.param_edit = Some(next);
+                app.refresh_status();
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn activate_menu_item(
+    app: &mut App,
+    client: &mut SynthClient<tonic::transport::Channel>,
+) {
+    let action = app
+        .menu_stack
+        .last()
+        .and_then(|m| m.items.get(m.selected))
+        .and_then(|e| e.action.clone());
+
+    let Some(action) = action else {
+        // Value-only row — ignore.
+        return;
+    };
+
+    match action {
+        MenuAction::OpenParams { module_idx } => {
+            app.push_menu(menu_build::params_menu(app, module_idx));
+        }
+        MenuAction::OpenOutputs { module_idx } => {
+            app.push_menu(menu_build::outputs_menu(app, module_idx));
+        }
+        MenuAction::OpenInputs { module_idx } => {
+            app.push_menu(menu_build::inputs_menu(app, module_idx));
+        }
+        MenuAction::OpenDisconnect { module_idx } => {
+            app.push_menu(menu_build::disconnect_menu(app, module_idx));
+        }
+        MenuAction::OpenAddKinds => {
+            app.push_menu(menu_build::add_kinds_menu(app));
+        }
+        MenuAction::OpenDevices { endpoint_id } => {
+            app.push_menu(menu_build::devices_menu(app, &endpoint_id));
+        }
+        MenuAction::OpenNotes { module_idx } => {
+            app.push_menu(menu_build::notes_menu(app, module_idx));
+        }
+        MenuAction::OpenInfo { module_idx } => {
+            app.push_menu(menu_build::info_menu(app, module_idx));
+        }
+        MenuAction::EditParam { control_index } => {
+            app.param_edit = Some(control_index);
+            app.refresh_status();
+        }
+        MenuAction::ArmOutput { module, port, name } => {
+            app.pending = Some(PendingCable {
+                src_module: module,
+                src_port: port,
+            });
+            app.clear_menus();
+            app.status = format!(
+                "armed {}.{} — target a module, Enter → Inputs…",
+                app.module_short(module),
+                name
+            );
+        }
+        MenuAction::ConnectInput { module, port, name } => {
+            connect_input(app, client, module, port, &name).await;
+        }
+        MenuAction::DisconnectCable {
+            cable_id,
+            src_module,
+            src_port,
+            dst_module,
+            dst_port,
+        } => {
             match client
-                .patch_connect(ConnectRequest {
-                    src_module: pending.src_module,
-                    src_port: pending.src_port,
-                    dst_module: dst,
-                    dst_port: port,
+                .patch_disconnect(DisconnectRequest {
+                    cable_id,
+                    src_module,
+                    src_port,
+                    dst_module,
+                    dst_port,
+                    use_cable_id: true,
                 })
                 .await
             {
                 Ok(resp) => {
-                    app.pending = None;
                     app.apply_snapshot(resp.into_inner());
-                    app.status = format!("connected → {name}");
+                    app.clear_menus();
+                    app.status = "unplugged cable".into();
                 }
                 Err(err) => {
-                    warn!(%err, "connect failed");
-                    app.status = format!("connect failed: {err}");
+                    warn!(%err, "disconnect failed");
+                    app.status = format!("disconnect failed: {err}");
                 }
             }
         }
-        Some(Item::DeviceCycle { endpoint_id }) => {
-            if let Some(device_name) = app.next_device_for(&endpoint_id) {
-                match client
-                    .set_io_device(SetIoDeviceRequest {
-                        endpoint_id: endpoint_id.clone(),
-                        device_name: device_name.clone(),
-                    })
-                    .await
-                {
-                    Ok(_) => {
-                        if let Ok(resp) = client.list_io_endpoints(Empty {}).await {
-                            app.io_endpoints = resp.into_inner().endpoints;
-                        }
-                        if let Ok(resp) = client.list_audio_devices(Empty {}).await {
-                            app.audio_devices = resp.into_inner().devices;
-                        }
-                        app.rebuild_ui_modules();
-                        app.restore_focus(None);
-                        app.status = format!("device → {device_name}");
-                    }
-                    Err(err) => app.status = format!("device failed: {err}"),
-                }
-            } else {
-                app.status = "no devices for this endpoint".into();
-            }
-        }
-        Some(Item::AddKind { kind, display_name }) => {
+        MenuAction::AddModule { kind, display_name } => {
+            let prefer = app.cursor;
             match client
                 .add_module(AddModuleRequest {
                     kind: kind.clone(),
@@ -170,113 +302,129 @@ async fn on_enter(app: &mut App, client: &mut SynthClient<tonic::transport::Chan
                         .map(|m| m.id)
                         .max();
                     app.apply_snapshot(snap);
+                    app.clear_menus();
                     if let Some(id) = new_id {
-                        if let Some(idx) = app
-                            .modules
-                            .iter()
-                            .position(|m| matches!(&m.id, ModuleId::Voice(v) if *v == id))
-                        {
-                            app.focus.module = idx;
-                            app.focus.item = 0;
-                        }
+                        app.place_new_voice_at(id, prefer);
+                        flush_coordinates(app, client).await;
                     }
                     app.status = format!("added {display_name}");
-                    app.refresh_status();
                 }
                 Err(err) => app.status = format!("add failed: {err}"),
             }
         }
-        Some(Item::Note { midi, .. }) => toggle_note(app, client, midi).await,
-        Some(Item::Param { control_index }) => {
-            if let Some((module, param, value)) = app.adjust_param(control_index, 1.0, true) {
-                let _ = client
-                    .set_param(SetParamRequest {
-                        module,
-                        param,
-                        value,
-                    })
-                    .await;
-                app.refresh_status();
+        MenuAction::StartMove { module_idx } => {
+            if !app.start_move(module_idx) {
+                app.status = "cannot move this module".into();
             }
         }
-        Some(Item::Display) | None => {
-            app.status = "nothing to activate".into();
+        MenuAction::SavePatch => {
+            app.clear_menus();
+            save_patch(app, client).await;
+        }
+        MenuAction::LoadPatch => {
+            app.clear_menus();
+            load_patch(app, client).await;
+        }
+        MenuAction::DeleteModule { module_id } => {
+            match client
+                .remove_module(RemoveModuleRequest { module_id })
+                .await
+            {
+                Ok(resp) => {
+                    app.apply_snapshot(resp.into_inner());
+                    app.clear_menus();
+                    app.status = format!("removed module {module_id}");
+                }
+                Err(err) => app.status = format!("remove failed: {err}"),
+            }
+        }
+        MenuAction::SetDevice {
+            endpoint_id,
+            device_name,
+        } => {
+            match client
+                .set_io_device(SetIoDeviceRequest {
+                    endpoint_id: endpoint_id.clone(),
+                    device_name: device_name.clone(),
+                })
+                .await
+            {
+                Ok(_) => {
+                    if let Ok(resp) = client.list_io_endpoints(Empty {}).await {
+                        app.io_endpoints = resp.into_inner().endpoints;
+                    }
+                    if let Ok(resp) = client.list_audio_devices(Empty {}).await {
+                        app.audio_devices = resp.into_inner().devices;
+                    }
+                    app.rebuild_ui_modules();
+                    app.rebind_placements(None);
+                    app.clear_menus();
+                    app.status = format!("device → {device_name}");
+                }
+                Err(err) => app.status = format!("device failed: {err}"),
+            }
+        }
+        MenuAction::ToggleNote { midi } => {
+            toggle_note(app, client, midi).await;
+            // Refresh notes menu in place if still open.
+            if let Some(top) = app.menu_stack.last() {
+                if top.title == "notes" {
+                    // Rebuild notes for keyboard module under cursor or any keyboard.
+                    let kbd = app
+                        .modules
+                        .iter()
+                        .position(|m| matches!(m.id, ModuleId::Keyboard));
+                    if let Some(idx) = kbd {
+                        let sel = top.selected;
+                        let mut menu = menu_build::notes_menu(app, idx);
+                        menu.selected = sel.min(menu.items.len().saturating_sub(1));
+                        if let Some(slot) = app.menu_stack.last_mut() {
+                            *slot = menu;
+                        }
+                    }
+                }
+            }
+            app.refresh_status();
         }
     }
 }
 
-async fn disconnect_focused_jack(
+async fn connect_input(
     app: &mut App,
     client: &mut SynthClient<tonic::transport::Channel>,
+    dst: u32,
+    port: u32,
+    name: &str,
 ) {
-    let item = app.focused_item().cloned();
-    let voice_id = app.focused_voice_id();
-    let (module_id, port, is_output) = match (voice_id, item) {
-        (Some(mid), Some(Item::Input { port, .. })) => (mid, port, false),
-        (Some(mid), Some(Item::Output { port, .. })) => (mid, port, true),
-        _ => {
-            app.status = "focus a jack to unplug".into();
-            return;
-        }
-    };
-
-    let cables: Vec<_> = app
-        .cables_on_jack(module_id, port, is_output)
-        .into_iter()
-        .cloned()
-        .collect();
-    if cables.is_empty() {
-        app.status = "no cables on this jack".into();
-        return;
-    }
-
-    let mut last_snap = None;
-    for c in &cables {
-        match client
-            .patch_disconnect(DisconnectRequest {
-                cable_id: c.id,
-                src_module: c.src_module,
-                src_port: c.src_port,
-                dst_module: c.dst_module,
-                dst_port: c.dst_port,
-                use_cable_id: true,
-            })
-            .await
-        {
-            Ok(resp) => last_snap = Some(resp.into_inner()),
-            Err(err) => {
-                app.status = format!("disconnect failed: {err}");
-                return;
-            }
-        }
-    }
-    if let Some(snap) = last_snap {
-        app.apply_snapshot(snap);
-        app.status = format!("unplugged {} cable(s)", cables.len());
-    }
-}
-
-async fn delete_focused_voice(
-    app: &mut App,
-    client: &mut SynthClient<tonic::transport::Channel>,
-) {
-    let Some(id) = app.focused_voice_id() else {
-        app.status = "focus a voice module to delete".into();
+    let Some(pending) = app.pending else {
+        app.status = "arm an output first (Outputs… → pick jack)".into();
         return;
     };
     match client
-        .remove_module(RemoveModuleRequest { module_id: id })
+        .patch_connect(ConnectRequest {
+            src_module: pending.src_module,
+            src_port: pending.src_port,
+            dst_module: dst,
+            dst_port: port,
+        })
         .await
     {
         Ok(resp) => {
+            app.pending = None;
             app.apply_snapshot(resp.into_inner());
-            app.status = format!("removed module {id}");
+            app.clear_menus();
+            app.status = format!("connected → {name}");
         }
-        Err(err) => app.status = format!("remove failed: {err}"),
+        Err(err) => {
+            warn!(%err, "connect failed");
+            app.status = format!("connect failed: {err}");
+        }
     }
 }
 
 async fn save_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>) {
+    // Ensure current lattice layout is in the document before export.
+    flush_coordinates(app, client).await;
     match client.save_patch(Empty {}).await {
         Ok(resp) => {
             let json = resp.into_inner().document_json;
@@ -302,6 +450,7 @@ async fn load_patch(app: &mut App, client: &mut SynthClient<tonic::transport::Ch
         {
             Ok(resp) => {
                 app.apply_snapshot(resp.into_inner());
+                app.clear_menus();
                 app.status = format!("loaded {DEFAULT_PATCH_FILE}");
             }
             Err(err) => app.status = format!("load failed: {err}"),

@@ -8,8 +8,9 @@ pub mod rt;
 pub mod synth;
 
 pub use patch::{
-    Cable, IoDirection, IoEndpoint, ModuleInfo, ModuleInstance, ParamInfo, Patch, PatchError,
-    PatchRoles, IO_DEVICE_DEFAULT, IO_ENDPOINT_AUDIO_IN, IO_ENDPOINT_AUDIO_OUT,
+    Cable, IoDirection, IoEndpoint, ModuleCoordinates, ModuleInfo, ModuleInstance, ParamInfo,
+    Patch, PatchCanvas, PatchError, PatchRoles, IO_DEVICE_DEFAULT, IO_ENDPOINT_AUDIO_IN,
+    IO_ENDPOINT_AUDIO_OUT,
 };
 pub use registry::{ModuleTypeInfo, ParamMeta, PortMeta};
 pub use synth::{Synth, MASTER_IO_MODULE};
@@ -26,6 +27,12 @@ pub const MAX_BLOCK_FRAMES: usize = 1024;
 pub const MAX_IO_METER_ENDPOINTS: usize = 2;
 /// Max channels per IO endpoint for peak meters.
 pub const MAX_IO_METER_CHANNELS: usize = 8;
+/// Max voice-graph modules tracked for live UI signal meters.
+pub const MAX_MODULE_SIGNALS: usize = 64;
+/// Decimated samples published per module for tile waveforms.
+pub const MODULE_SIGNAL_WAVE_LEN: usize = 32;
+/// Max patch cables tracked for live wire intensity.
+pub const MAX_CABLE_SIGNALS: usize = 128;
 
 /// Everything that can reach the audio thread from the outside: hardware
 /// MIDI, and now also a gRPC client (see the `engine` host). Sent over an
@@ -57,6 +64,49 @@ pub struct IoEndpointStatus {
     pub channels: usize,
 }
 
+/// One voice-graph module's live signal snapshot (control-surface meters).
+#[derive(Clone, Debug, Default)]
+pub struct ModuleSignalMeter {
+    pub module_id: u32,
+    pub peak: f32,
+    /// Decimated recent block (length ≤ [`MODULE_SIGNAL_WAVE_LEN`]).
+    pub waveform: Vec<f32>,
+}
+
+/// One patch cable's live peak (source port absolute peak).
+#[derive(Clone, Debug, Default)]
+pub struct CableSignalMeter {
+    pub cable_id: u32,
+    pub peak: f32,
+}
+
+/// Fixed-size live module/cable meters published by the audio thread.
+/// Copied under a single `try_lock` — no heap growth on the audio path.
+#[derive(Clone, Debug)]
+pub struct LiveSignalBank {
+    pub module_count: usize,
+    pub module_ids: [u32; MAX_MODULE_SIGNALS],
+    pub module_peaks: [f32; MAX_MODULE_SIGNALS],
+    pub module_waves: [f32; MAX_MODULE_SIGNALS * MODULE_SIGNAL_WAVE_LEN],
+    pub cable_count: usize,
+    pub cable_ids: [u32; MAX_CABLE_SIGNALS],
+    pub cable_peaks: [f32; MAX_CABLE_SIGNALS],
+}
+
+impl Default for LiveSignalBank {
+    fn default() -> Self {
+        Self {
+            module_count: 0,
+            module_ids: [0; MAX_MODULE_SIGNALS],
+            module_peaks: [0.0; MAX_MODULE_SIGNALS],
+            module_waves: [0.0; MAX_MODULE_SIGNALS * MODULE_SIGNAL_WAVE_LEN],
+            cable_count: 0,
+            cable_ids: [0; MAX_CABLE_SIGNALS],
+            cable_peaks: [0.0; MAX_CABLE_SIGNALS],
+        }
+    }
+}
+
 /// Engine state published by the audio thread for anything that wants to
 /// observe it without touching the audio path itself (e.g. a gRPC state
 /// stream). Wait-free: the audio callback only ever does atomic stores here
@@ -82,6 +132,8 @@ pub struct EngineMeters {
     /// Resolved device names + connected flags (control thread writes;
     /// gRPC stream reads). Not touched on the audio callback.
     io_status: std::sync::Mutex<Vec<IoEndpointStatus>>,
+    /// Per-module + per-cable live peaks / short waveforms for the lattice UI.
+    live_signals: std::sync::Mutex<LiveSignalBank>,
 }
 
 impl Default for EngineMeters {
@@ -95,6 +147,7 @@ impl Default for EngineMeters {
             }),
             io_channel_counts: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
             io_status: std::sync::Mutex::new(Vec::new()),
+            live_signals: std::sync::Mutex::new(LiveSignalBank::default()),
         }
     }
 }
@@ -188,6 +241,48 @@ impl EngineMeters {
 
     pub fn active_voices(&self) -> u32 {
         self.active_voices.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Publish per-module / per-cable live meters (audio thread, try_lock).
+    pub fn publish_live_signals(&self, bank: &LiveSignalBank) -> bool {
+        match self.live_signals.try_lock() {
+            Ok(mut slot) => {
+                *slot = bank.clone();
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// Read module + cable live meters for StreamState (allocates off audio).
+    pub fn module_signals(&self) -> Vec<ModuleSignalMeter> {
+        let Ok(bank) = self.live_signals.lock() else {
+            return Vec::new();
+        };
+        let n = bank.module_count.min(MAX_MODULE_SIGNALS);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let base = i * MODULE_SIGNAL_WAVE_LEN;
+            out.push(ModuleSignalMeter {
+                module_id: bank.module_ids[i],
+                peak: bank.module_peaks[i],
+                waveform: bank.module_waves[base..base + MODULE_SIGNAL_WAVE_LEN].to_vec(),
+            });
+        }
+        out
+    }
+
+    pub fn cable_signals(&self) -> Vec<CableSignalMeter> {
+        let Ok(bank) = self.live_signals.lock() else {
+            return Vec::new();
+        };
+        let n = bank.cable_count.min(MAX_CABLE_SIGNALS);
+        (0..n)
+            .map(|i| CableSignalMeter {
+                cable_id: bank.cable_ids[i],
+                peak: bank.cable_peaks[i],
+            })
+            .collect()
     }
 }
 

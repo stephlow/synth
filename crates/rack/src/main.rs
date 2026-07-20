@@ -1,13 +1,20 @@
-//! `rack`: keyboard-driven modular TUI for a running `engine`.
+//! `rack`: lattice modular TUI for a running `engine`.
 //!
-//! One interaction model: focus module (`h`/`l`), focus item (`j`/`k`), act
-//! with `Enter` / `-`=` / `x` / … No modes, no menus.
+//! Interaction model: move a **target** on the lattice (`arrows` / `hjkl`),
+//! **Enter** opens a nested command menu for the cell, **Esc** pops the mode
+//! stack. Patch cables are drawn in gutters between module tiles.
+//!
+//! Topology stays in sync with external clients (MCP, other racks): the
+//! state stream carries `patch_generation`; when it advances, rack refetches
+//! `GetPatch` and rebuilds the lattice.
 
 mod app;
 mod build;
 mod draw;
 mod keys;
+mod menu_build;
 mod model;
+mod place;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use crossterm::terminal::{
@@ -90,6 +97,32 @@ async fn main() -> anyhow::Result<()> {
                             app.output_peak = state.output_peak;
                             app.scope = state.waveform;
                             app.io_meters = state.io_meters;
+                            app.apply_live_signals(state.module_signals, state.cable_signals);
+
+                            // External clients (MCP) can mutate topology while
+                            // rack is open — pull a fresh snapshot when the
+                            // generation counter advances.
+                            if state.patch_generation != app.patch_generation {
+                                match client.get_patch(Empty {}).await {
+                                    Ok(resp) => {
+                                        info!(
+                                            from = app.patch_generation,
+                                            to = state.patch_generation,
+                                            "patch generation changed; applying snapshot"
+                                        );
+                                        app.apply_snapshot(resp.into_inner());
+                                        app.patch_generation = state.patch_generation;
+                                        // Leave menus if topology moved under them.
+                                        if !app.menu_stack.is_empty() || app.param_edit.is_some() {
+                                            app.clear_menus();
+                                            app.status = "patch updated (external)".into();
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(%err, "get_patch after generation change failed");
+                                    }
+                                }
+                            }
                         }
                         Some(Err(err)) => warn!(%err, "state stream error"),
                         None => {

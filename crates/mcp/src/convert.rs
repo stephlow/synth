@@ -83,11 +83,18 @@ pub fn audio_devices(list: &[AudioDevice]) -> Value {
 }
 
 fn module_instance(m: &ModuleInstanceDescriptor) -> Value {
-    json!({
+    let mut v = json!({
         "id": m.id,
         "kind": m.kind,
         "name": m.name,
-    })
+    });
+    if let Some(c) = m.coordinates.as_ref() {
+        v.as_object_mut().unwrap().insert(
+            "coordinates".into(),
+            json!({ "x": c.x, "y": c.y }),
+        );
+    }
+    v
 }
 
 fn cable(c: &CableDescriptor) -> Value {
@@ -111,14 +118,21 @@ fn roles(r: &PatchRolesDescriptor) -> Value {
 }
 
 pub fn patch_snapshot(s: &PatchSnapshot) -> Value {
-    json!({
+    let mut v = json!({
         "controls": controls(&s.controls),
         "cables": s.cables.iter().map(cable).collect::<Vec<_>>(),
         "modules": s.modules.iter().map(module_instance).collect::<Vec<_>>(),
         "roles": s.roles.as_ref().map(roles),
         "io_endpoints": io_endpoints(&s.io_endpoints),
         "document_json": s.document_json,
-    })
+    });
+    if let Some(c) = s.canvas.as_ref() {
+        v.as_object_mut().unwrap().insert(
+            "canvas".into(),
+            json!({ "width": c.width, "height": c.height }),
+        );
+    }
+    v
 }
 
 fn io_meter(m: &IoChannelMeter) -> Value {
@@ -136,6 +150,7 @@ pub fn engine_state(s: &EngineState) -> Value {
         "active_voices": s.active_voices,
         "output_peak": s.output_peak,
         "io_meters": s.io_meters.iter().map(io_meter).collect::<Vec<_>>(),
+        "patch_generation": s.patch_generation,
     })
 }
 

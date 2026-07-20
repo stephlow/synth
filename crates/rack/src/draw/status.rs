@@ -1,57 +1,60 @@
-//! Status strip under the rack.
+//! Status strip under the lattice.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::draw::style::{status_primary, status_secondary};
+use crate::draw::style::{canvas_bg, status_primary, status_rule, status_secondary};
+use crate::draw::text::truncate;
+use crate::model::LatticePos;
 
 pub fn draw_status(
     frame: &mut Frame,
     area: Rect,
     text: &str,
     pending: bool,
-    page: usize,
-    pages: usize,
-    vis_start: usize,
-    vis_end: usize,
-    total: usize,
+    cursor: LatticePos,
+    grid_cols: u16,
+    grid_rows: u16,
+    status_h: u16,
 ) {
     if area.height == 0 {
         return;
     }
+    frame.render_widget(Block::default().style(canvas_bg()), area);
 
+    let w = area.width as usize;
     let mut lines = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "─".repeat(area.width as usize),
-        Style::default().add_modifier(Modifier::DIM),
-    )));
 
-    if area.height >= 2 {
-        let prefix = if pending { " ◆ " } else { " · " };
-        let page_bit = if pages > 1 {
-            format!(
-                "   ·  page {}/{}  ·  showing {}–{} of {}",
-                page + 1,
-                pages,
-                vis_start + 1,
-                vis_end.max(vis_start + 1),
-                total
-            )
-        } else {
-            String::new()
-        };
+    if status_h >= 2 {
         lines.push(Line::from(Span::styled(
-            format!("{prefix}{text}{page_bit}"),
-            status_primary(pending),
+            "─".repeat(w),
+            status_rule(),
         )));
     }
 
-    if area.height >= 3 {
+    let prefix = if pending { " ◆ " } else { " · " };
+    let pos = if w > 60 {
+        format!("   ·  @{},{} / {}×{}", cursor.x, cursor.y, grid_cols, grid_rows)
+    } else if w > 36 {
+        format!("  @{},{}", cursor.x, cursor.y)
+    } else {
+        String::new()
+    };
+    let body = truncate(&format!("{prefix}{text}{pos}"), w);
+    lines.push(Line::from(Span::styled(body, status_primary(pending))));
+
+    if status_h >= 3 && area.height >= lines.len() as u16 + 1 {
+        let hints = if w >= 56 {
+            "   arrows navigate   Enter menu   Esc back   z-m notes   q quit"
+        } else if w >= 36 {
+            "   arrows · Enter · Esc · q"
+        } else {
+            "   ←↑↓→ Enter Esc q"
+        };
         lines.push(Line::from(Span::styled(
-            "   h/l module   j/k item   enter patch   [ ] page   -/= knob   x unplug   S/L save",
+            truncate(hints, w),
             status_secondary(),
         )));
     }

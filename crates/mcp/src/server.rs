@@ -12,7 +12,8 @@ use rmcp::{
 use synth_proto::synth_client::SynthClient;
 use synth_proto::{
     AddModuleRequest, CalibrationRequest, ConnectRequest, DisconnectRequest, Empty,
-    LoadPatchRequest, NoteOffRequest, NoteOnRequest, RemoveModuleRequest, SetIoDeviceRequest,
+    LoadPatchRequest, ModuleCoordinatesEntry, NoteOffRequest, NoteOnRequest, PatchCanvas,
+    RemoveModuleRequest, SetCoordinatesRequest, SetIoDeviceRequest, SetModuleCoordinatesRequest,
     SetParamRequest,
 };
 use tokio_stream::StreamExt;
@@ -122,6 +123,36 @@ struct DisconnectArgs {
 struct LoadPatchArgs {
     /// Full patch document JSON (same format as `get_patch` / `save_patch`).
     document_json: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SetModuleCoordinatesArgs {
+    /// Stable patch module id.
+    module_id: u32,
+    /// Lattice x (column).
+    x: u32,
+    /// Lattice y (row).
+    y: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct ModuleCoordinateArg {
+    module_id: u32,
+    x: u32,
+    y: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct SetCoordinatesArgs {
+    /// Voice module lattice positions.
+    #[serde(default)]
+    modules: Vec<ModuleCoordinateArg>,
+    /// Optional preferred canvas width in cells.
+    #[serde(default)]
+    canvas_width: Option<u32>,
+    /// Optional preferred canvas height in cells.
+    #[serde(default)]
+    canvas_height: Option<u32>,
 }
 
 #[tool_router]
@@ -386,6 +417,70 @@ impl SynthMcp {
     }
 
     #[tool(
+        description = "Set lattice coordinates {x,y} for one module (control surface only; ignored by DSP)"
+    )]
+    async fn set_module_coordinates(
+        &self,
+        Parameters(args): Parameters<SetModuleCoordinatesArgs>,
+    ) -> Result<String, String> {
+        debug!(
+            module_id = args.module_id,
+            x = args.x,
+            y = args.y,
+            "set_module_coordinates"
+        );
+        let snap = self
+            .client()
+            .set_module_coordinates(SetModuleCoordinatesRequest {
+                module_id: args.module_id,
+                x: args.x,
+                y: args.y,
+            })
+            .await
+            .map_err(|e| e.to_string())?
+            .into_inner();
+        Ok(convert::json_pretty(&convert::patch_snapshot(&snap)))
+    }
+
+    #[tool(
+        description = "Batch-set module lattice coordinates and optional canvas size (control surface only)"
+    )]
+    async fn set_coordinates(
+        &self,
+        Parameters(args): Parameters<SetCoordinatesArgs>,
+    ) -> Result<String, String> {
+        debug!(n = args.modules.len(), "set_coordinates");
+        let modules = args
+            .modules
+            .into_iter()
+            .map(|m| ModuleCoordinatesEntry {
+                module_id: m.module_id,
+                x: m.x,
+                y: m.y,
+            })
+            .collect();
+        let canvas = match (args.canvas_width, args.canvas_height) {
+            (Some(width), Some(height)) => Some(PatchCanvas { width, height }),
+            (Some(width), None) => Some(PatchCanvas {
+                width,
+                height: 20,
+            }),
+            (None, Some(height)) => Some(PatchCanvas {
+                width: 32,
+                height,
+            }),
+            (None, None) => None,
+        };
+        let snap = self
+            .client()
+            .set_coordinates(SetCoordinatesRequest { modules, canvas })
+            .await
+            .map_err(|e| e.to_string())?
+            .into_inner();
+        Ok(convert::json_pretty(&convert::patch_snapshot(&snap)))
+    }
+
+    #[tool(
         description = "One-shot live engine meters (voices, peak, I/O). Not a continuous stream."
     )]
     async fn get_state(&self) -> Result<String, String> {
@@ -421,7 +516,9 @@ impl ServerHandler for SynthMcp {
         .with_instructions(
             "Manage a running modular synth engine over gRPC. \
              Use list_module_types / get_patch / list_controls to inspect, \
-             then set_param, add_module, patch_connect, note_on, etc. to edit. \
+             then set_param, add_module, patch_connect, note_on, \
+             set_coordinates, etc. to edit. \
+             Module layout uses coordinates {x,y} and optional canvas; ignored by DSP. \
              Engine must already be running.",
         )
     }

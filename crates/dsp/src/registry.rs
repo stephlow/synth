@@ -357,7 +357,8 @@ static ENTRIES: &[Entry] = &[
                 ParamMeta {
                     name: "Scale",
                     index: Attenuverter::PARAM_SCALE,
-                    min: 0.0,
+                    // Full bipolar attenuverter range (mod depth + invert).
+                    min: -2.0,
                     max: 2.0,
                     default: 1.0,
                 },

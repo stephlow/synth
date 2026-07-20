@@ -73,6 +73,13 @@ pub enum PatchOp {
     LoadDocument { json: String },
     /// Snapshot only (no rebuild); still takes exclusive access briefly.
     GetSnapshot,
+    /// Control-surface lattice coordinates for one module.
+    SetModuleCoordinates { id: u32, x: u32, y: u32 },
+    /// Batch coordinates + optional canvas size.
+    SetCoordinates {
+        positions: Vec<(u32, u32, u32)>,
+        canvas: Option<dsp::PatchCanvas>,
+    },
 }
 
 /// Result of a successful patch op (for gRPC tables + client refresh).
@@ -187,6 +194,8 @@ impl AudioCore {
             .update(peak, inner.synth.active_voice_count());
         self.meters
             .publish_waveform(inner.synth.scope_waveform());
+        self.meters
+            .publish_live_signals(inner.synth.live_signals());
 
         let mut out_peaks = [0.0f32; 8];
         let n_out = Synth::NUM_OUTPUT_CHANNELS.min(8);
@@ -348,6 +357,18 @@ impl IoRuntime {
                     inner.synth.load_patch(patch).map_err(|e| e.to_string())?;
                 }
                 PatchOp::GetSnapshot => {}
+                PatchOp::SetModuleCoordinates { id, x, y } => {
+                    inner
+                        .synth
+                        .set_module_coordinates(id, x, y)
+                        .map_err(|e| e.to_string())?;
+                }
+                PatchOp::SetCoordinates { positions, canvas } => {
+                    inner
+                        .synth
+                        .set_coordinates(&positions, canvas)
+                        .map_err(|e| e.to_string())?;
+                }
             }
 
             // Refresh MIDI CC targets from the new topology (best-effort:
