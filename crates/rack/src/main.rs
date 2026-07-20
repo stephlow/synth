@@ -3,8 +3,9 @@
 //! bordered module panels (one panel per module, grouped by the
 //! `ListControls` response's `module`/`module_name`), each drawn in a style
 //! that fits its `module_kind` — knobs for a filter/VCA, a vertical fader for
-//! the LFO, horizontal bars for everything else — plus a level-meter panel
-//! and a toggle-style on-screen-keyboard panel.
+//! the LFO, horizontal bars for everything else — plus patch-owned IO
+//! modules (meters + device picker), a level-meter panel, and a toggle-style
+//! on-screen-keyboard panel.
 
 use std::collections::HashSet;
 
@@ -18,7 +19,10 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
 use synth_proto::synth_client::SynthClient;
-use synth_proto::{ControlDescriptor, Empty, NoteOffRequest, NoteOnRequest, SetParamRequest};
+use synth_proto::{
+    AudioDevice, ControlDescriptor, Empty, IoChannelMeter, IoEndpointDescriptor, NoteOffRequest,
+    NoteOnRequest, SetIoDeviceRequest, SetParamRequest,
+};
 use tracing::{debug, info, trace, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -61,6 +65,7 @@ impl ControlStyle {
         match kind {
             "vco" | "vcf" | "vca" => ControlStyle::Knob,
             "lfo" => ControlStyle::Fader,
+            "io" => ControlStyle::Bar,
             _ => ControlStyle::Bar,
         }
     }
@@ -118,13 +123,25 @@ struct App {
     output_peak: f32,
     /// Most recent block of the mixed output, for the oscilloscope panel.
     scope: Vec<f32>,
+    /// Patch-owned IO endpoints from `ListIoEndpoints`.
+    io_endpoints: Vec<IoEndpointDescriptor>,
+    /// Live meters keyed by endpoint id (from `StreamState`).
+    io_meters: Vec<IoChannelMeter>,
+    /// Host devices for the device picker (`ListAudioDevices`).
+    audio_devices: Vec<AudioDevice>,
+    /// Which IO endpoint is focused for device cycling (`[` / `]`).
+    selected_io: usize,
     held_notes: HashSet<u8>,
     quit: bool,
     state_stream_ended: bool,
 }
 
 impl App {
-    fn new(controls: Vec<ControlDescriptor>) -> Self {
+    fn new(
+        controls: Vec<ControlDescriptor>,
+        io_endpoints: Vec<IoEndpointDescriptor>,
+        audio_devices: Vec<AudioDevice>,
+    ) -> Self {
         let values = controls.iter().map(|c| c.default_value).collect();
         let panels = build_panels(&controls);
         Self {
@@ -135,10 +152,51 @@ impl App {
             active_voices: 0,
             output_peak: 0.0,
             scope: Vec::new(),
+            io_endpoints,
+            io_meters: Vec::new(),
+            audio_devices,
+            selected_io: 0,
             held_notes: HashSet::new(),
             quit: false,
             state_stream_ended: false,
         }
+    }
+
+    fn selected_io_endpoint(&self) -> Option<&IoEndpointDescriptor> {
+        self.io_endpoints.get(self.selected_io)
+    }
+
+    /// Devices that match the selected endpoint's direction.
+    fn devices_for_selected_io(&self) -> Vec<&AudioDevice> {
+        let Some(ep) = self.selected_io_endpoint() else {
+            return Vec::new();
+        };
+        let want_input = ep.direction == "input";
+        self.audio_devices
+            .iter()
+            .filter(|d| if want_input { d.is_input } else { d.is_output })
+            .collect()
+    }
+
+    /// Cycle the selected IO endpoint to the next matching host device.
+    fn next_device_name_for_selected_io(&self) -> Option<String> {
+        let ep = self.selected_io_endpoint()?;
+        let devices = self.devices_for_selected_io();
+        if devices.is_empty() {
+            return None;
+        }
+        let current = self
+            .io_meters
+            .iter()
+            .find(|m| m.endpoint_id == ep.id)
+            .map(|m| m.device_name.as_str())
+            .unwrap_or(ep.device_name.as_str());
+        let idx = devices
+            .iter()
+            .position(|d| d.name == current)
+            .map(|i| (i + 1) % devices.len())
+            .unwrap_or(0);
+        Some(devices[idx].name.clone())
     }
 
     fn select_prev(&mut self) {
@@ -220,7 +278,19 @@ async fn main() -> anyhow::Result<()> {
 
     let controls = client.list_controls(Empty {}).await?.into_inner().controls;
     info!(count = controls.len(), "fetched control list");
-    let mut app = App::new(controls);
+    let io_endpoints = client
+        .list_io_endpoints(Empty {})
+        .await?
+        .into_inner()
+        .endpoints;
+    info!(count = io_endpoints.len(), "fetched IO endpoints");
+    let audio_devices = client
+        .list_audio_devices(Empty {})
+        .await?
+        .into_inner()
+        .devices;
+    info!(count = audio_devices.len(), "fetched audio devices");
+    let mut app = App::new(controls, io_endpoints, audio_devices);
     debug!(panels = app.panels.len(), "built rack panels");
 
     let mut state_stream = client.stream_state(Empty {}).await?.into_inner();
@@ -253,6 +323,7 @@ async fn main() -> anyhow::Result<()> {
                             app.active_voices = state.active_voices;
                             app.output_peak = state.output_peak;
                             app.scope = state.waveform;
+                            app.io_meters = state.io_meters;
                         }
                         Some(Err(err)) => {
                             warn!(%err, "state stream error");
@@ -307,6 +378,44 @@ async fn handle_key(app: &mut App, client: &mut SynthClient<tonic::transport::Ch
                 }
             }
         }
+        // [ / ]: select IO endpoint for device cycling.
+        KeyCode::Char('[') => {
+            if !app.io_endpoints.is_empty() {
+                app.selected_io = app.selected_io.saturating_sub(1);
+            }
+        }
+        KeyCode::Char(']') => {
+            if !app.io_endpoints.is_empty() {
+                app.selected_io = (app.selected_io + 1).min(app.io_endpoints.len() - 1);
+            }
+        }
+        // d: cycle device for the focused IO endpoint (patch binding).
+        KeyCode::Char('d') => {
+            if let (Some(ep), Some(device_name)) = (
+                app.selected_io_endpoint().map(|e| e.id.clone()),
+                app.next_device_name_for_selected_io(),
+            ) {
+                match client
+                    .set_io_device(SetIoDeviceRequest {
+                        endpoint_id: ep.clone(),
+                        device_name: device_name.clone(),
+                    })
+                    .await
+                {
+                    Ok(_) => {
+                        info!(endpoint = %ep, device = %device_name, "set_io_device ok");
+                        // Refresh endpoint list so the panel shows the new binding.
+                        if let Ok(resp) = client.list_io_endpoints(Empty {}).await {
+                            app.io_endpoints = resp.into_inner().endpoints;
+                        }
+                        if let Ok(resp) = client.list_audio_devices(Empty {}).await {
+                            app.audio_devices = resp.into_inner().devices;
+                        }
+                    }
+                    Err(err) => warn!(%err, endpoint = %ep, device = %device_name, "set_io_device failed"),
+                }
+            }
+        }
         KeyCode::Char(c) => {
             if let Some(&(_, note)) = NOTE_KEYS.iter().find(|(k, _)| *k == c) {
                 if app.held_notes.remove(&note) {
@@ -340,10 +449,12 @@ fn draw(frame: &mut Frame, app: &App) {
         .map(|row| row.iter().map(ModulePanel::height).max().unwrap_or(0))
         .collect();
 
+    let io_row_height: u16 = 4;
     let mut constraints: Vec<Constraint> = row_heights.iter().map(|h| Constraint::Length(*h)).collect();
+    constraints.push(Constraint::Length(io_row_height)); // IO modules
     constraints.push(Constraint::Length(3)); // meter panel
     constraints.push(Constraint::Length(3)); // keyboard panel
-    constraints.push(Constraint::Min(0)); // leftover space
+    constraints.push(Constraint::Min(0)); // leftover / scope
 
     let outer = Layout::default().direction(Direction::Vertical).constraints(constraints).split(area);
 
@@ -357,9 +468,119 @@ fn draw(frame: &mut Frame, app: &App) {
         }
     }
 
-    draw_meter(frame, app, outer[rows.len()]);
-    draw_keyboard(frame, app, outer[rows.len() + 1]);
-    draw_scope(frame, app, outer[rows.len() + 2]);
+    let io_idx = rows.len();
+    draw_io_row(frame, app, outer[io_idx]);
+    draw_meter(frame, app, outer[io_idx + 1]);
+    draw_keyboard(frame, app, outer[io_idx + 2]);
+    if outer.len() > io_idx + 3 {
+        draw_scope(frame, app, outer[io_idx + 3]);
+    }
+}
+
+fn draw_io_row(frame: &mut Frame, app: &App, area: Rect) {
+    if app.io_endpoints.is_empty() {
+        let empty = Paragraph::new("No IO endpoints").block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title("IO (patch)"),
+        );
+        frame.render_widget(empty, area);
+        return;
+    }
+
+    let n = app.io_endpoints.len();
+    let constraints: Vec<Constraint> = (0..n).map(|_| Constraint::Ratio(1, n as u32)).collect();
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+
+    for (i, ep) in app.io_endpoints.iter().enumerate() {
+        draw_io_panel(frame, app, ep, i == app.selected_io, cols[i]);
+    }
+}
+
+fn draw_io_panel(
+    frame: &mut Frame,
+    app: &App,
+    ep: &IoEndpointDescriptor,
+    selected: bool,
+    area: Rect,
+) {
+    let meter = app
+        .io_meters
+        .iter()
+        .find(|m| m.endpoint_id == ep.id);
+    let device = meter
+        .map(|m| m.device_name.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ep.device_name.as_str());
+    let connected = meter.map(|m| m.connected).unwrap_or(false);
+    let peaks = meter.map(|m| m.peak.as_slice()).unwrap_or(&[]);
+
+    let peak_label = if peaks.is_empty() {
+        "—".to_string()
+    } else {
+        peaks
+            .iter()
+            .map(|p| format!("{:.2}", p))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let status = if connected { "ok" } else { "off" };
+    let title = if selected {
+        format!("▶ {} [{}]", ep.name, status)
+    } else {
+        format!("{} [{}]", ep.name, status)
+    };
+
+    let border_style = if selected {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+
+    let max_peak = peaks.iter().copied().fold(0.0f32, f32::max).clamp(0.0, 1.0);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    let device_line = Paragraph::new(Line::from(Span::raw(truncate_str(device, rows[0].width as usize))));
+    frame.render_widget(device_line, rows[0]);
+
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(if connected {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }))
+        .label(peak_label)
+        .ratio(max_peak as f64);
+    frame.render_widget(gauge, rows[1]);
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else if max <= 1 {
+        s.chars().take(max).collect()
+    } else {
+        let mut t: String = s.chars().take(max - 1).collect();
+        t.push('…');
+        t
+    }
 }
 
 fn draw_panel(frame: &mut Frame, app: &App, panel: &ModulePanel, area: Rect) {
@@ -461,7 +682,7 @@ fn draw_keyboard(frame: &mut Frame, app: &App, area: Rect) {
     let keyboard = Paragraph::new(Line::from(held)).block(
         Block::default()
             .borders(Borders::ALL)
-            .title("Keyboard \u{2014} \u{2190}/\u{2192} select, -/= adjust, \u{2191}/\u{2193} panel, q quit"),
+            .title("Keyboard — ←/→ select, -/= adjust, ↑/↓ panel, [/] IO, d device, q quit"),
     );
     frame.render_widget(keyboard, area);
 }

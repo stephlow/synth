@@ -11,7 +11,7 @@
 //!   cargo run --release --example bench_throughput
 
 use std::time::Instant;
-use synth::Synth;
+use dsp::Synth;
 use wmidi::{Note, Velocity};
 
 #[derive(Clone, Copy)]

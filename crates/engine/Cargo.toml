@@ -9,7 +9,7 @@ name = "engine"
 path = "src/main.rs"
 
 [dependencies]
-synth = { path = "../synth" }
+dsp = { path = "../dsp" }
 synth-proto = { path = "../proto" }
 anyhow = "1.0.86"
 cpal = "0.15.3"

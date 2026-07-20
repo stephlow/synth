@@ -3,14 +3,14 @@ syntax = "proto3";
 package synth;
 
 // Control surface + live metering for a running `engine` process. See
-// `engine`'s SynthService impl for the server side and `console` for the
+// `engine`'s SynthService impl for the server side and `rack` for the
 // TUI client.
 service Synth {
   // Change a single module parameter (e.g. filter cutoff).
   rpc SetParam(SetParamRequest) returns (Empty);
 
   // Calibrate a hardware output channel (scale/offset), see
-  // synth::Synth::set_output_calibration.
+  // dsp::Synth::set_output_calibration.
   rpc SetOutputCalibration(CalibrationRequest) returns (Empty);
 
   // Play/stop a note without needing MIDI hardware attached to the engine.
@@ -21,7 +21,17 @@ service Synth {
   // render knobs without hardcoding module/param indices itself.
   rpc ListControls(Empty) returns (ControlList);
 
-  // Live engine state (active voices, output level), pushed periodically.
+  // Patch-owned hardware IO endpoints (device bindings + channel layout).
+  rpc ListIoEndpoints(Empty) returns (IoEndpointList);
+
+  // Enumerate host audio devices for IO device pickers.
+  rpc ListAudioDevices(Empty) returns (AudioDeviceList);
+
+  // Change which device a patch IO endpoint is bound to (runtime).
+  rpc SetIoDevice(SetIoDeviceRequest) returns (Empty);
+
+  // Live engine state (active voices, output level, IO meters), pushed
+  // periodically.
   rpc StreamState(Empty) returns (stream EngineState);
 }
 
@@ -71,6 +81,46 @@ message ControlList {
   repeated ControlDescriptor controls = 1;
 }
 
+message IoEndpointDescriptor {
+  string id = 1;
+  string name = 2;
+  // "input" or "output"
+  string direction = 3;
+  uint32 channels = 4;
+  // Patch-owned device binding ("default" or a cpal device name).
+  string device_name = 5;
+}
+
+message IoEndpointList {
+  repeated IoEndpointDescriptor endpoints = 1;
+}
+
+message AudioDevice {
+  string name = 1;
+  bool is_input = 2;
+  bool is_output = 3;
+  uint32 max_input_channels = 4;
+  uint32 max_output_channels = 5;
+}
+
+message AudioDeviceList {
+  repeated AudioDevice devices = 1;
+}
+
+message SetIoDeviceRequest {
+  // Patch endpoint id, e.g. "audio_in" / "audio_out".
+  string endpoint_id = 1;
+  // cpal device name, or empty / "default" for host default.
+  string device_name = 2;
+}
+
+message IoChannelMeter {
+  string endpoint_id = 1;
+  repeated float peak = 2;
+  string device_name = 3;
+  bool connected = 4;
+}
+
 message EngineState {
   uint32 active_voices = 1;
   float output_peak = 2;
@@ -79,4 +129,6 @@ message EngineState {
   // rendered block (<= MAX_BLOCK_FRAMES), and it may be empty when no
   // audio has been rendered yet.
   repeated float waveform = 3;
+  // Per-endpoint live meters + resolved device status.
+  repeated IoChannelMeter io_meters = 4;
 }

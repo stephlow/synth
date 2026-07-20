@@ -1,5 +1,5 @@
 [package]
-name = "synth"
+name = "dsp"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true

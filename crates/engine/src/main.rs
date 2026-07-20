@@ -1,31 +1,323 @@
+//! Live engine host: cpal IO + MIDI + gRPC.
+//!
+//! **Latency model:** DSP runs inside the **output device callback** (device
+//! clock is the master). Capture uses a small SPSC ring between the input
+//! and output callbacks. There is no soft-RT worker pre-filling a large
+//! output buffer.
+//!
+//! **Device hot-swap:** streams live on the IO control thread (cpal `Stream`
+//! is `!Send` on some hosts). `AudioCore` is shared via `Arc`; the output
+//! callback has exclusive access to DSP state while a stream is running.
+//! Dropping the stream joins the callback, then the IO thread may reopen.
+
+mod audio_io;
 mod grpc;
 
-use cpal::{
-    traits::{DeviceTrait, HostTrait, StreamTrait},
-    SizedSample,
-};
-use cpal::{FromSample, Sample};
-use rtrb::{Consumer, Producer, RingBuffer};
-use std::io::{stdin, stdout, Write};
+use std::cell::UnsafeCell;
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use synth::midi::{setup_midi, MidiMessage};
-use synth::modules::{Attenuverter, Envelope, Lfo, Vcf};
-use synth::{rt, Command, EngineMeters, ModuleInfo, Synth, MAX_BLOCK_FRAMES};
-use tracing::{debug, error, info, warn};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use cpal::traits::DeviceTrait;
+use cpal::{FromSample, Sample, SampleFormat};
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
-/// How many external-input channels are captured from hardware and fed
-/// into the patch — must match `synth::synth::NUM_EXTERNAL_INPUT_CHANNELS`
-/// (not public; kept in sync by convention, since it's just 2 today).
-const NUM_EXTERNAL_INPUT_CHANNELS: usize = 2;
-/// Ring buffer capacity between the input and output audio callbacks:
-/// generous relative to a typical block so occasional scheduling jitter
-/// between the two independent callbacks doesn't cause audible gaps.
-const RING_BUFFER_FRAMES: usize = MAX_BLOCK_FRAMES * 4;
+use audio_io::{
+    open_input_stream, open_output_config, open_output_for_format, open_output_process_stream,
+    status_from_endpoints, warn_optional_input, SharedCapture, NUM_EXTERNAL_INPUT_CHANNELS,
+};
+use dsp::midi::{setup_midi, MidiMessage};
+use dsp::modules::{Attenuverter, Envelope, Lfo, Vcf};
+use dsp::{
+    rt, Command, EngineMeters, IoEndpoint, ModuleInfo, Synth, IO_ENDPOINT_AUDIO_IN,
+    IO_ENDPOINT_AUDIO_OUT, MAX_BLOCK_FRAMES,
+};
 
 /// Address the gRPC server listens on; the `rack` TUI connects here.
 const GRPC_ADDR: &str = "127.0.0.1:50051";
+
+/// Control-plane requests to reopen hardware from patch device bindings.
+#[derive(Debug)]
+pub enum IoControl {
+    SetDevice {
+        endpoint_id: String,
+        device_name: String,
+        reply: std::sync::mpsc::Sender<Result<(), String>>,
+    },
+}
+
+/// Mutable DSP + command state accessed **only** from the output callback
+/// while a stream is running, or from the IO thread after the stream is
+/// dropped (never concurrently).
+struct AudioInner {
+    synth: Synth,
+    rx: Receiver<Command>,
+    calibration: OutputCalibration,
+    cc_targets: CcTargets,
+    external_scratch: [[f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
+}
+
+/// Shared with the output stream callback. Capture slot uses try_lock only.
+struct AudioCore {
+    inner: UnsafeCell<AudioInner>,
+    capture: SharedCapture,
+    meters: Arc<EngineMeters>,
+}
+
+// Safety: exclusive access protocol — callback XOR IO thread after stream drop.
+unsafe impl Send for AudioCore {}
+unsafe impl Sync for AudioCore {}
+
+impl AudioCore {
+    fn new(
+        sample_rate: f32,
+        rx: Receiver<Command>,
+        cc_targets: CcTargets,
+        capture: SharedCapture,
+        meters: Arc<EngineMeters>,
+    ) -> Self {
+        Self {
+            inner: UnsafeCell::new(AudioInner {
+                synth: Synth::new(sample_rate),
+                rx,
+                calibration: OutputCalibration::default(),
+                cc_targets,
+                external_scratch: [[0.0; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
+            }),
+            capture,
+            meters,
+        }
+    }
+
+    /// RT callback entry: no blocking locks, no sleep, no heap alloc.
+    fn process_output<T: Sample + FromSample<f32>>(&self, output: &mut [T], num_channels: usize) {
+        rt::flush_denormals_to_zero();
+
+        // SAFETY: only the output callback may call this while the stream
+        // is alive; cpal does not re-enter the callback.
+        let inner = unsafe { &mut *self.inner.get() };
+
+        while let Ok(command) = inner.rx.try_recv() {
+            match command {
+                Command::Midi(midi_message) => match midi_message {
+                    MidiMessage::NoteOn(note, velocity) => inner.synth.note_on(note, velocity),
+                    MidiMessage::NoteOff(note, velocity) => inner.synth.note_off(note, velocity),
+                    MidiMessage::ProgramChange(_program) => {}
+                    MidiMessage::ControlChange(controller, value) => {
+                        apply_control_change(
+                            &mut inner.synth,
+                            &inner.cc_targets,
+                            &mut inner.calibration,
+                            controller,
+                            value,
+                        );
+                    }
+                },
+                Command::SetParam { module, param, value } => {
+                    inner.synth.set_param(module, param, value);
+                }
+                Command::SetOutputCalibration {
+                    channel,
+                    scale,
+                    offset,
+                } => inner.synth.set_output_calibration(channel, scale, offset),
+                Command::SetIoDevice {
+                    endpoint_id,
+                    device_name,
+                } => {
+                    let _ = inner.synth.set_io_device(&endpoint_id, &device_name);
+                }
+                Command::NoteOn { note, velocity } => inner.synth.note_on(note, velocity),
+                Command::NoteOff { note } => {
+                    inner.synth.note_off(note, wmidi::Velocity::MIN);
+                }
+            }
+        }
+
+        process_frame(
+            output,
+            &mut inner.synth,
+            num_channels,
+            &self.capture,
+            &mut inner.external_scratch,
+        );
+
+        let peak = inner
+            .synth
+            .output_channel(Synth::CHANNEL_AUDIO)
+            .iter()
+            .fold(0.0f32, |m, &s| m.max(s.abs()));
+        self.meters
+            .update(peak, inner.synth.active_voice_count());
+        self.meters
+            .publish_waveform(inner.synth.scope_waveform());
+
+        let mut out_peaks = [0.0f32; 8];
+        let n_out = Synth::NUM_OUTPUT_CHANNELS.min(8);
+        for ch in 0..n_out {
+            out_peaks[ch] = inner
+                .synth
+                .output_channel(ch)
+                .iter()
+                .fold(0.0f32, |m, &s| m.max(s.abs()));
+        }
+        self.meters
+            .update_io_peaks(EngineMeters::SLOT_AUDIO_OUT, &out_peaks[..n_out]);
+
+        let mut in_peaks = [0.0f32; 8];
+        let n_in = NUM_EXTERNAL_INPUT_CHANNELS.min(8);
+        for ch in 0..n_in {
+            in_peaks[ch] = inner.synth.external_input_peak(ch);
+        }
+        self.meters
+            .update_io_peaks(EngineMeters::SLOT_AUDIO_IN, &in_peaks[..n_in]);
+    }
+}
+
+/// Owns live cpal streams; realizes patch IO bindings.
+struct IoRuntime {
+    endpoints: Vec<IoEndpoint>,
+    sample_rate: u32,
+    core: Arc<AudioCore>,
+    _input_stream: Option<cpal::Stream>,
+    _output_stream: Option<cpal::Stream>,
+    out_resolved: String,
+    in_resolved: String,
+    out_connected: bool,
+    in_connected: bool,
+    meters: Arc<EngineMeters>,
+}
+
+impl IoRuntime {
+    fn publish_status(&self) {
+        self.meters.set_io_status(status_from_endpoints(
+            &self.endpoints,
+            self.out_connected,
+            &self.out_resolved,
+            self.in_connected,
+            &self.in_resolved,
+        ));
+    }
+
+    fn set_device(&mut self, endpoint_id: &str, device_name: &str) -> Result<(), String> {
+        let ep = self
+            .endpoints
+            .iter_mut()
+            .find(|e| e.id == endpoint_id)
+            .ok_or_else(|| format!("unknown IO endpoint '{endpoint_id}'"))?;
+        ep.device = if device_name.is_empty() {
+            dsp::IO_DEVICE_DEFAULT.to_string()
+        } else {
+            device_name.to_string()
+        };
+        let endpoints = self.endpoints.clone();
+
+        match endpoint_id {
+            id if id == IO_ENDPOINT_AUDIO_IN => self.reopen_input(&endpoints),
+            id if id == IO_ENDPOINT_AUDIO_OUT => self.reopen_output(&endpoints),
+            other => Err(format!("unsupported IO endpoint '{other}'")),
+        }
+    }
+
+    fn reopen_input(&mut self, endpoints: &[IoEndpoint]) -> Result<(), String> {
+        match open_input_stream(endpoints) {
+            Ok((stream, consumers, resolved)) => {
+                if let Ok(mut slot) = self.core.capture.lock() {
+                    *slot = Some(consumers);
+                }
+                self._input_stream = Some(stream);
+                self.in_resolved = resolved;
+                self.in_connected = true;
+                self.publish_status();
+                info!(device = %self.in_resolved, "input device reopened");
+                Ok(())
+            }
+            Err(err) => {
+                if let Ok(mut slot) = self.core.capture.lock() {
+                    *slot = None;
+                }
+                self._input_stream = None;
+                self.in_connected = false;
+                self.in_resolved = String::new();
+                self.publish_status();
+                Err(format!("failed to open input: {err}"))
+            }
+        }
+    }
+
+    fn reopen_output(&mut self, endpoints: &[IoEndpoint]) -> Result<(), String> {
+        // Drop current output first so the callback finishes and we regain
+        // exclusive access to AudioCore (Synth state preserved).
+        self._output_stream = None;
+
+        let (device, supported) =
+            open_output_config(endpoints).map_err(|e| format!("resolve output: {e}"))?;
+        let rate = supported.sample_rate().0;
+        if rate != self.sample_rate {
+            return Err(format!(
+                "sample rate mismatch: device wants {rate} Hz, engine runs at {} Hz",
+                self.sample_rate
+            ));
+        }
+
+        let stream = build_output_stream(&device, &supported, Arc::clone(&self.core))
+            .map_err(|e| format!("open output: {e}"))?;
+        let resolved = device.name().unwrap_or_else(|_| "<unnamed>".into());
+        let channels = supported.channels() as usize;
+
+        self._output_stream = Some(stream);
+        self.out_resolved = resolved;
+        self.out_connected = true;
+        self.publish_status();
+        info!(device = %self.out_resolved, channels, "output device reopened (callback DSP)");
+        Ok(())
+    }
+}
+
+fn build_output_stream(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    core: Arc<AudioCore>,
+) -> Result<cpal::Stream, anyhow::Error> {
+    let num_channels = supported.channels() as usize;
+    open_output_for_format(device, supported, |format, config| {
+        let core = Arc::clone(&core);
+        match format {
+            SampleFormat::I8 => open_output_process_stream::<i8, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::I16 => open_output_process_stream::<i16, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::I32 => open_output_process_stream::<i32, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::I64 => open_output_process_stream::<i64, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::U8 => open_output_process_stream::<u8, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::U16 => open_output_process_stream::<u16, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::U32 => open_output_process_stream::<u32, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::U64 => open_output_process_stream::<u64, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::F32 => open_output_process_stream::<f32, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            SampleFormat::F64 => open_output_process_stream::<f64, _>(device, config, move |out| {
+                core.process_output(out, num_channels);
+            }),
+            other => Err(anyhow::anyhow!("unsupported sample format '{other}'")),
+        }
+    })
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,197 +327,217 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!(version = env!("CARGO_PKG_VERSION"), "starting engine");
 
-    let (tx, rx) = mpsc::channel::<Command>();
+    let (cmd_tx, cmd_rx) = mpsc::channel::<Command>();
+    let (io_tx, io_rx) = mpsc::channel::<IoControl>();
 
-    // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
     debug!("connecting MIDI input");
-    let _conn_in = setup_midi(tx.clone())?;
+    let _conn_in = setup_midi(cmd_tx.clone())?;
     info!("MIDI input connected");
 
-    // Hardware audio/CV input is optional: if no input device is
-    // available (or it fails to open), we fall back to running with
-    // silent external-input channels rather than failing to start.
-    debug!("probing for an audio input device");
-    let (consumers, _input_stream) = match setup_input_stream() {
-        Ok((stream, consumers)) => {
-            info!("external audio/CV input connected");
-            (Some(consumers), Some(stream))
-        }
-        Err(err) => {
-            warn!(%err, "no audio input available; continuing without external audio/CV input");
-            (None, None)
-        }
-    };
+    let probe = Synth::new(48_000.0);
+    let endpoints = probe.describe_io().to_vec();
+    let descriptors = grpc::build_control_descriptors(&probe);
+    let cc_targets = CcTargets::resolve(probe.describe_patch());
+    let io_descriptors = grpc::build_io_descriptors(&probe);
+
+    let (out_device, out_config) = open_output_config(&endpoints)?;
+    let sample_rate = out_config.sample_rate().0;
+    let out_resolved_probe = out_device
+        .name()
+        .unwrap_or_else(|_| "<unnamed>".into());
+    info!(
+        sample_rate,
+        channels = out_config.channels(),
+        device = %out_resolved_probe,
+        "output from patch binding"
+    );
+    drop(out_device);
 
     let meters = Arc::new(EngineMeters::default());
-    let (descriptors, cc_targets) = {
-        let (_host, _device, config) = host_device_setup()?;
-        let sample_rate = config.sample_rate().0 as f32;
-        // A throwaway Synth just to read off its (data-independent) module
-        // layout for the control descriptor table and MIDI CC map below;
-        // the real Synth used for audio lives inside the cpal callback
-        // (built in `make_stream`).
-        debug!(sample_rate, "probing patch layout");
-        let probe = Synth::new(sample_rate);
-        let descriptors = grpc::build_control_descriptors(&probe);
-        let cc_targets = CcTargets::resolve(probe.describe_patch());
-        (descriptors, cc_targets)
-    };
+    let shared_capture: SharedCapture = Arc::new(Mutex::new(None));
 
-    debug!("setting up audio output stream");
-    let stream = stream_setup_for(rx, consumers, Arc::clone(&meters), cc_targets)?;
-    stream.play()?;
-    info!("audio stream started");
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+
+    let io_meters = Arc::clone(&meters);
+    let io_capture = Arc::clone(&shared_capture);
+    let io_endpoints = endpoints.clone();
+    thread::Builder::new()
+        .name("io-control".into())
+        .spawn(move || {
+            let core = Arc::new(AudioCore::new(
+                sample_rate as f32,
+                cmd_rx,
+                cc_targets,
+                Arc::clone(&io_capture),
+                Arc::clone(&io_meters),
+            ));
+
+            let mut input_stream = None;
+            let mut in_resolved = String::new();
+            let mut in_connected = false;
+            match open_input_stream(&io_endpoints) {
+                Ok((stream, consumers, resolved)) => {
+                    *io_capture.lock().unwrap() = Some(consumers);
+                    input_stream = Some(stream);
+                    in_resolved = resolved;
+                    in_connected = true;
+                    info!(device = %in_resolved, "input from patch binding");
+                }
+                Err(err) => warn_optional_input(&err),
+            }
+
+            let open_out = (|| {
+                let (device, supported) = open_output_config(&io_endpoints)?;
+                let stream = build_output_stream(&device, &supported, Arc::clone(&core))?;
+                let resolved = device.name().unwrap_or_else(|_| "<unnamed>".into());
+                Ok::<_, anyhow::Error>((stream, resolved))
+            })();
+
+            let (output_stream, out_resolved, out_connected) = match open_out {
+                Ok((stream, resolved)) => {
+                    info!(device = %resolved, "output stream started (callback DSP)");
+                    (Some(stream), resolved, true)
+                }
+                Err(err) => {
+                    let _ = ready_tx.send(Err(format!("failed to open output: {err}")));
+                    return;
+                }
+            };
+
+            let mut io_runtime = IoRuntime {
+                endpoints: io_endpoints,
+                sample_rate,
+                core,
+                _input_stream: input_stream,
+                _output_stream: output_stream,
+                out_resolved,
+                in_resolved,
+                out_connected,
+                in_connected,
+                meters: io_meters,
+            };
+            io_runtime.publish_status();
+            let _ = ready_tx.send(Ok(()));
+
+            while let Ok(msg) = io_rx.recv() {
+                match msg {
+                    IoControl::SetDevice {
+                        endpoint_id,
+                        device_name,
+                        reply,
+                    } => {
+                        let result = io_runtime.set_device(&endpoint_id, &device_name);
+                        let _ = reply.send(result);
+                    }
+                }
+            }
+        })?;
+
+    ready_rx
+        .recv()
+        .map_err(|_| anyhow::anyhow!("IO control thread exited before ready"))?
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     info!(addr = GRPC_ADDR, "gRPC server listening");
-    grpc::serve(GRPC_ADDR, tx, meters, descriptors).await?;
+    grpc::serve(
+        GRPC_ADDR,
+        cmd_tx,
+        io_tx,
+        meters,
+        descriptors,
+        io_descriptors,
+    )
+    .await?;
 
     info!("engine shutting down");
     Ok(())
 }
 
-pub fn stream_setup_for(
-    rx: Receiver<Command>,
-    input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
-    meters: Arc<EngineMeters>,
-    cc_targets: CcTargets,
-) -> Result<cpal::Stream, anyhow::Error> {
-    let (_host, device, config) = host_device_setup()?;
+/// Renders `output` (interleaved across `num_channels`) from the synth.
+/// Capture consumers are taken with **try_lock** only — never blocks.
+fn process_frame<SampleType>(
+    output: &mut [SampleType],
+    synth: &mut Synth,
+    num_channels: usize,
+    capture: &SharedCapture,
+    external_scratch: &mut [[f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
+) where
+    SampleType: Sample + FromSample<f32>,
+{
+    let total_frames = output.len() / num_channels.max(1);
+    let mut done = 0;
+    while done < total_frames {
+        let chunk_frames = (total_frames - done).min(MAX_BLOCK_FRAMES);
 
-    match config.sample_format() {
-        cpal::SampleFormat::I8 => make_stream::<i8>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::I32 => make_stream::<i32>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::I64 => make_stream::<i64>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::U8 => make_stream::<u8>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::U16 => make_stream::<u16>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::U32 => make_stream::<u32>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::U64 => make_stream::<u64>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config.into(), rx, input, meters, cc_targets),
-        cpal::SampleFormat::F64 => make_stream::<f64>(&device, &config.into(), rx, input, meters, cc_targets),
-        sample_format => Err(anyhow::Error::msg(format!(
-            "Unsupported sample format '{sample_format}'"
-        ))),
-    }
-}
-
-pub fn host_device_setup(
-) -> Result<(cpal::Host, cpal::Device, cpal::SupportedStreamConfig), anyhow::Error> {
-    let host = cpal::default_host();
-    let device = select_device(host.output_devices()?, "output")?;
-    info!(device = %device.name()?, "output device selected");
-
-    let config = device.default_output_config()?;
-    info!(?config, "default output config");
-
-    Ok((host, device, config))
-}
-
-/// Picks an output or input device generically — any audio interface,
-/// not a hardcoded one: auto-selects if exactly one is available,
-/// otherwise lists them and prompts via stdin. Mirrors
-/// `midi::setup_midi`'s existing interactive port-selection pattern, so
-/// picking "the ES-8" vs "the 2i2" (or any other interface) for either
-/// direction is just a matter of what you type at startup.
-fn select_device(
-    devices: impl Iterator<Item = cpal::Device>,
-    kind: &str,
-) -> Result<cpal::Device, anyhow::Error> {
-    let devices: Vec<cpal::Device> = devices.collect();
-    match devices.len() {
-        0 => Err(anyhow::Error::msg(format!("No {kind} device available"))),
-        1 => {
-            let name = devices[0].name().unwrap_or_else(|_| "<unnamed>".into());
-            info!(%name, kind, "choosing the only available device");
-            Ok(devices.into_iter().next().unwrap())
-        }
-        _ => {
-            println!("\nAvailable {kind} devices:");
-            for (i, d) in devices.iter().enumerate() {
-                let name = d.name().unwrap_or_else(|_| "<unnamed>".into());
-                println!("{i}: {name}");
-            }
-            print!("Please select {kind} device: ");
-            stdout().flush()?;
-            let mut input = String::new();
-            stdin().read_line(&mut input)?;
-            let index: usize = input.trim().parse()?;
-            let chosen = devices
-                .into_iter()
-                .nth(index)
-                .ok_or_else(|| anyhow::Error::msg(format!("invalid {kind} device selected")))?;
-            info!(name = %chosen.name().unwrap_or_else(|_| "<unnamed>".into()), kind, index, "device selected");
-            Ok(chosen)
-        }
-    }
-}
-
-/// Builds the (optional) hardware audio/CV input stream: captures
-/// whatever the default input device provides and pushes it, deinterleaved
-/// into up to `NUM_EXTERNAL_INPUT_CHANNELS` channels, through a pair of
-/// lock-free single-producer/single-consumer ring buffers (one per
-/// channel) to the output callback — audio callbacks must never
-/// block/lock, and the input and output streams are independent
-/// callbacks with independent timing, so a wait-free handoff is the
-/// right tool here. A mono input device duplicates its one channel to
-/// both; a device with more than 2 channels only captures the first 2.
-fn setup_input_stream() -> Result<(cpal::Stream, [Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]), anyhow::Error> {
-    let host = cpal::default_host();
-    let device = select_device(host.input_devices()?, "input")?;
-    info!(device = %device.name()?, "input device selected");
-
-    let config = device.default_input_config()?;
-    info!(?config, "default input config");
-    let in_channels = config.channels() as usize;
-
-    let (producer_left, consumer_left) = RingBuffer::<f32>::new(RING_BUFFER_FRAMES);
-    let (producer_right, consumer_right) = RingBuffer::<f32>::new(RING_BUFFER_FRAMES);
-    let mut producers = [producer_left, producer_right];
-
-    let err_fn = |err| error!(%err, "input sound stream error");
-    let stream = match config.sample_format() {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                push_captured_input(data, in_channels, &mut producers)
+        // try_lock: if the IO thread is swapping devices, feed silence.
+        match capture.try_lock() {
+            Ok(mut guard) => match guard.as_mut() {
+                Some(consumers) => {
+                    for channel in 0..NUM_EXTERNAL_INPUT_CHANNELS {
+                        let scratch = &mut external_scratch[channel][..chunk_frames];
+                        for sample in scratch.iter_mut() {
+                            *sample = consumers[channel].pop().unwrap_or(0.0);
+                        }
+                        synth.write_external_input(channel, scratch);
+                    }
+                }
+                None => {
+                    for channel in 0..NUM_EXTERNAL_INPUT_CHANNELS {
+                        external_scratch[channel][..chunk_frames].fill(0.0);
+                        synth.write_external_input(
+                            channel,
+                            &external_scratch[channel][..chunk_frames],
+                        );
+                    }
+                }
             },
-            err_fn,
-            None,
-        )?,
-        other => {
-            return Err(anyhow::Error::msg(format!(
-                "Unsupported input sample format '{other}' (only F32 input is currently supported)"
-            )))
+            Err(_) => {
+                for channel in 0..NUM_EXTERNAL_INPUT_CHANNELS {
+                    external_scratch[channel][..chunk_frames].fill(0.0);
+                    synth.write_external_input(
+                        channel,
+                        &external_scratch[channel][..chunk_frames],
+                    );
+                }
+            }
         }
-    };
 
-    Ok((stream, [consumer_left, consumer_right]))
-}
+        synth.process_block(chunk_frames);
 
-/// Deinterleaves a captured input buffer and pushes each frame's L/R
-/// samples into their ring buffer. Uses `try_push`-style semantics
-/// (`Producer::push` never blocks): if the output side hasn't drained
-/// enough yet, a sample is simply dropped rather than stalling this
-/// (real-time) callback.
-fn push_captured_input(
-    data: &[f32],
-    in_channels: usize,
-    producers: &mut [Producer<f32>; NUM_EXTERNAL_INPUT_CHANNELS],
-) {
-    for frame in data.chunks(in_channels.max(1)) {
-        let left = frame.first().copied().unwrap_or(0.0);
-        let right = frame.get(1).copied().unwrap_or(left);
-        let _ = producers[0].push(left);
-        let _ = producers[1].push(right);
+        for i in 0..chunk_frames {
+            let frame_start = (done + i) * num_channels;
+            for (channel, out) in output[frame_start..frame_start + num_channels]
+                .iter_mut()
+                .enumerate()
+            {
+                let sample = if channel < Synth::NUM_OUTPUT_CHANNELS {
+                    synth.output_channel(channel)[i]
+                } else {
+                    0.0
+                };
+                *out = SampleType::from_sample(sample);
+            }
+        }
+
+        done += chunk_frames;
     }
 }
 
-/// Live-tunable calibration for the master hardware-out pitch/gate CV
-/// channels (see `Io`'s doc comment for how to derive the right numbers
-/// for real hardware, e.g. `pitch_scale = 0.1` for a ±10V-scale
-/// DC-coupled interface). Tracked here (not read back from `Synth`) so a
-/// scale-only or offset-only CC can update just its half of the pair
-/// without needing a getter on `Synth::set_output_calibration`.
+/// Writes `frames` of synth output into an interleaved f32 buffer (tests).
+fn render_interleaved(synth: &Synth, interleaved: &mut [f32], num_channels: usize, frames: usize) {
+    debug_assert_eq!(interleaved.len(), frames * num_channels);
+    for i in 0..frames {
+        for channel in 0..num_channels {
+            let sample = if channel < Synth::NUM_OUTPUT_CHANNELS {
+                synth.output_channel(channel)[i]
+            } else {
+                0.0
+            };
+            interleaved[i * num_channels + channel] = sample;
+        }
+    }
+}
+
 struct OutputCalibration {
     pitch_scale: f32,
     pitch_offset: f32,
@@ -244,22 +556,11 @@ impl Default for OutputCalibration {
     }
 }
 
-/// Module targets `apply_control_change` drives, resolved once at startup
-/// from the running patch's own self-description (`Synth::describe_patch`)
-/// rather than hardcoded field access — MIDI CC and the gRPC control table
-/// (`grpc::build_control_descriptors`) both derive their targets from the
-/// same source now, so they can't drift apart.
 #[derive(Debug)]
 pub struct CcTargets {
     vcf: usize,
     lfo: usize,
     lfo_depth: usize,
-    /// The amp envelope specifically — two `"envelope"`-kind modules exist
-    /// (amp + filter, both named/kinded identically since they're the same
-    /// module type); `DefaultPatch::build` places the amp envelope first, so
-    /// the first `"envelope"` entry in describe-order is it. This is the one
-    /// place that relies on that ordering; it's only meaningful for
-    /// `DefaultPatch`, the sole `Patch` impl today.
     amp_env: usize,
 }
 
@@ -283,11 +584,6 @@ impl CcTargets {
     }
 }
 
-/// Maps a MIDI CC controller number + 0..127 value onto a `Synth`
-/// parameter change. This is the "patch bay of the control surface":
-/// extend this list to wire up more knobs. The same param set is exposed
-/// to gRPC clients via `grpc::build_control_descriptors`, so MIDI and the
-/// `rack` TUI drive identical targets.
 fn apply_control_change(
     synth: &mut Synth,
     targets: &CcTargets,
@@ -295,180 +591,60 @@ fn apply_control_change(
     controller: u8,
     value: u8,
 ) {
-    let normalized = value as f32 / 127.0; // 0..1
+    let normalized = value as f32 / 127.0;
 
     match controller {
         74 => {
-            // Filter cutoff: 20 Hz .. ~10 kHz, exponential feel.
             let cutoff = 20.0 * (500.0f32).powf(normalized);
             synth.set_param(targets.vcf, Vcf::PARAM_CUTOFF, cutoff);
         }
         71 => {
-            // Filter resonance.
             synth.set_param(targets.vcf, Vcf::PARAM_RESONANCE, normalized);
         }
         1 => {
-            // Mod wheel: LFO-to-cutoff depth, in octaves.
             synth.set_param(targets.lfo_depth, Attenuverter::PARAM_SCALE, normalized * 2.0);
         }
         76 => {
-            // LFO rate: 0.1 .. ~20 Hz, exponential feel.
             let rate = 0.1 * (200.0f32).powf(normalized);
             synth.set_param(targets.lfo, Lfo::PARAM_RATE, rate);
         }
         72 => {
-            // Amp envelope release time: 0.01 .. ~5s.
             let release = 0.01 + normalized * 5.0;
             synth.set_param(targets.amp_env, Envelope::PARAM_RELEASE, release);
         }
-        // Master output calibration — see `OutputCalibration`'s doc
-        // comment and `Io`'s worked examples for how to derive these for
-        // real hardware (e.g. an Expert Sleepers ES-8).
         20 => {
-            calibration.pitch_scale = normalized; // 0..1
-            synth.set_output_calibration(Synth::CHANNEL_PITCH_CV, calibration.pitch_scale, calibration.pitch_offset);
+            calibration.pitch_scale = normalized;
+            synth.set_output_calibration(
+                Synth::CHANNEL_PITCH_CV,
+                calibration.pitch_scale,
+                calibration.pitch_offset,
+            );
         }
         21 => {
-            calibration.pitch_offset = normalized * 2.0 - 1.0; // -1..1
-            synth.set_output_calibration(Synth::CHANNEL_PITCH_CV, calibration.pitch_scale, calibration.pitch_offset);
+            calibration.pitch_offset = normalized * 2.0 - 1.0;
+            synth.set_output_calibration(
+                Synth::CHANNEL_PITCH_CV,
+                calibration.pitch_scale,
+                calibration.pitch_offset,
+            );
         }
         22 => {
-            calibration.gate_scale = normalized; // 0..1
-            synth.set_output_calibration(Synth::CHANNEL_GATE_CV, calibration.gate_scale, calibration.gate_offset);
+            calibration.gate_scale = normalized;
+            synth.set_output_calibration(
+                Synth::CHANNEL_GATE_CV,
+                calibration.gate_scale,
+                calibration.gate_offset,
+            );
         }
         23 => {
-            calibration.gate_offset = normalized * 2.0 - 1.0; // -1..1
-            synth.set_output_calibration(Synth::CHANNEL_GATE_CV, calibration.gate_scale, calibration.gate_offset);
+            calibration.gate_offset = normalized * 2.0 - 1.0;
+            synth.set_output_calibration(
+                Synth::CHANNEL_GATE_CV,
+                calibration.gate_scale,
+                calibration.gate_offset,
+            );
         }
         _ => {}
-    }
-}
-
-pub fn make_stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    rx: Receiver<Command>,
-    input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
-    meters: Arc<EngineMeters>,
-    cc_targets: CcTargets,
-) -> Result<cpal::Stream, anyhow::Error>
-where
-    T: SizedSample + FromSample<f32>,
-{
-    let num_channels = config.channels as usize;
-    let mut synth = Synth::new(config.sample_rate.0 as f32);
-    let mut calibration = OutputCalibration::default();
-    let mut input = input;
-    // Reused every callback: popped-from-the-ring-buffer external input,
-    // staged before each block — never (re)allocated on the audio thread.
-    let mut external_scratch = [[0.0f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS];
-    let err_fn = |err| error!(%err, "output sound stream error");
-
-    let stream = device.build_output_stream(
-        config,
-        move |output: &mut [T], _: &cpal::OutputCallbackInfo| {
-            // Denormal tails (decaying envelopes, filter/feedback settling
-            // toward silence) can otherwise stall the CPU badly enough to
-            // miss the callback deadline; see `rt::flush_denormals_to_zero`.
-            rt::flush_denormals_to_zero();
-
-            while let Ok(command) = rx.try_recv() {
-                match command {
-                    Command::Midi(midi_message) => match midi_message {
-                        MidiMessage::NoteOn(note, velocity) => synth.note_on(note, velocity),
-                        MidiMessage::NoteOff(note, velocity) => synth.note_off(note, velocity),
-                        MidiMessage::ProgramChange(_program) => {}
-                        MidiMessage::ControlChange(controller, value) => {
-                            apply_control_change(&mut synth, &cc_targets, &mut calibration, controller, value)
-                        }
-                    },
-                    Command::SetParam { module, param, value } => synth.set_param(module, param, value),
-                    Command::SetOutputCalibration { channel, scale, offset } => {
-                        synth.set_output_calibration(channel, scale, offset)
-                    }
-                    Command::NoteOn { note, velocity } => synth.note_on(note, velocity),
-                    Command::NoteOff { note } => synth.note_off(note, wmidi::Velocity::MIN),
-                }
-            }
-            process_frame(
-                output,
-                &mut synth,
-                num_channels,
-                input.as_mut(),
-                &mut external_scratch,
-            );
-
-            let peak = synth
-                .output_channel(Synth::CHANNEL_AUDIO)
-                .iter()
-                .fold(0.0f32, |m, &s| m.max(s.abs()));
-            meters.update(peak, synth.active_voice_count());
-            meters.publish_waveform(synth.scope_waveform());
-        },
-        err_fn,
-        None,
-    )?;
-
-    Ok(stream)
-}
-
-/// Renders `output` (interleaved across `num_channels`) from the synth,
-/// one block of up to `MAX_BLOCK_FRAMES` frames at a time — the graph
-/// engine is built for a fixed maximum block size, so a callback buffer
-/// bigger than that is simply split into sub-blocks here rather than
-/// requiring the engine to grow its (preallocated) scratch storage.
-///
-/// Each physical output channel maps 1:1 to `Synth::output_channel`:
-/// channel 0 is the mixed synth audio, 1/2 are pitch/gate CV-out, and
-/// any channel beyond what the synth defines reads as silence — the
-/// old "duplicate mono to every channel" behavior is gone, since
-/// blindly copying a CV signal onto every channel would be actively
-/// harmful when other channels are wired to real Eurorack gear.
-fn process_frame<SampleType>(
-    output: &mut [SampleType],
-    synth: &mut Synth,
-    num_channels: usize,
-    mut input: Option<&mut [Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
-    external_scratch: &mut [[f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
-) where
-    SampleType: Sample + FromSample<f32>,
-{
-    let total_frames = output.len() / num_channels;
-    let mut done = 0;
-    while done < total_frames {
-        let chunk_frames = (total_frames - done).min(MAX_BLOCK_FRAMES);
-
-        // Pull whatever external input is available for this chunk;
-        // missing samples (input not yet caught up, or no input device)
-        // read as silence rather than blocking this callback.
-        for channel in 0..NUM_EXTERNAL_INPUT_CHANNELS {
-            let scratch = &mut external_scratch[channel][..chunk_frames];
-            match input.as_mut() {
-                Some(consumers) => {
-                    for sample in scratch.iter_mut() {
-                        *sample = consumers[channel].pop().unwrap_or(0.0);
-                    }
-                }
-                None => scratch.fill(0.0),
-            }
-            synth.write_external_input(channel, scratch);
-        }
-
-        synth.process_block(chunk_frames);
-
-        for i in 0..chunk_frames {
-            let frame_start = (done + i) * num_channels;
-            for (channel, out) in output[frame_start..frame_start + num_channels].iter_mut().enumerate() {
-                let sample = if channel < Synth::NUM_OUTPUT_CHANNELS {
-                    synth.output_channel(channel)[i]
-                } else {
-                    0.0
-                };
-                *out = SampleType::from_sample(sample);
-            }
-        }
-
-        done += chunk_frames;
     }
 }
 
@@ -479,12 +655,11 @@ mod tests {
 
     fn synth_with_a_note_held() -> Synth {
         let mut synth = Synth::new(48_000.0);
-        synth.note_on(Note::try_from(69).unwrap(), Velocity::try_from(100).unwrap());
+        synth.note_on(
+            Note::try_from(69).unwrap(),
+            Velocity::try_from(100).unwrap(),
+        );
         synth
-    }
-
-    fn no_external_scratch() -> [[f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS] {
-        [[0.0; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS]
     }
 
     #[test]
@@ -492,35 +667,31 @@ mod tests {
         let mut synth = synth_with_a_note_held();
         let num_channels = 4;
         let frames = 8;
-        let mut output = vec![0.0f32; frames * num_channels];
-        let mut scratch = no_external_scratch();
+        synth.process_block(frames);
+        let mut interleaved = vec![0.0f32; frames * num_channels];
+        render_interleaved(&synth, &mut interleaved, num_channels, frames);
 
-        process_frame(&mut output, &mut synth, num_channels, None, &mut scratch);
-
-        // Re-render the same held note separately and compare against
-        // Synth's own per-channel output directly, frame by frame.
         let mut reference = synth_with_a_note_held();
         reference.process_block(frames);
 
-        for (i, frame) in output.chunks_exact(num_channels).enumerate() {
-            assert_eq!(frame[0], reference.output_channel(0)[i], "channel 0 (audio) mismatch");
-            assert_eq!(frame[1], reference.output_channel(1)[i], "channel 1 (pitch CV) mismatch");
-            assert_eq!(frame[2], reference.output_channel(2)[i], "channel 2 (gate CV) mismatch");
-            assert_eq!(frame[3], 0.0, "channel 3 (aux) should be silent");
+        for (i, frame) in interleaved.chunks_exact(num_channels).enumerate() {
+            assert_eq!(frame[0], reference.output_channel(0)[i]);
+            assert_eq!(frame[1], reference.output_channel(1)[i]);
+            assert_eq!(frame[2], reference.output_channel(2)[i]);
+            assert_eq!(frame[3], 0.0);
         }
     }
 
     #[test]
     fn channels_beyond_what_the_synth_defines_are_silent() {
         let mut synth = synth_with_a_note_held();
-        let num_channels = 6; // more than Synth::NUM_OUTPUT_CHANNELS
+        let num_channels = 6;
         let frames = 4;
-        let mut output = vec![1.0f32; frames * num_channels]; // sentinel, not 0.0
-        let mut scratch = no_external_scratch();
+        synth.process_block(frames);
+        let mut interleaved = vec![1.0f32; frames * num_channels];
+        render_interleaved(&synth, &mut interleaved, num_channels, frames);
 
-        process_frame(&mut output, &mut synth, num_channels, None, &mut scratch);
-
-        for frame in output.chunks_exact(num_channels) {
+        for frame in interleaved.chunks_exact(num_channels) {
             for &sample in &frame[Synth::NUM_OUTPUT_CHANNELS..] {
                 assert_eq!(sample, 0.0);
             }
@@ -528,48 +699,36 @@ mod tests {
     }
 
     #[test]
-    fn chunking_into_sub_blocks_does_not_change_the_rendered_signal() {
-        // process_frame splits a callback buffer into sub-blocks of at
-        // most MAX_BLOCK_FRAMES. The result should be identical no
-        // matter how many chunks that takes — otherwise there's an
-        // off-by-one/dropped-or-duplicated-sample bug at the boundaries.
-        let num_channels = 1;
-        let total_frames = MAX_BLOCK_FRAMES * 2 + 17; // forces multiple sub-blocks + a remainder
-
+    fn process_frame_writes_every_sample_without_capture() {
         let mut synth = synth_with_a_note_held();
-        let mut output = vec![0.0f32; total_frames];
-        let mut scratch = no_external_scratch();
-        process_frame(&mut output, &mut synth, num_channels, None, &mut scratch);
-
-        // Compare against directly driving Synth block-by-block at the
-        // same chunk size process_frame uses internally.
-        let mut reference = synth_with_a_note_held();
-        let mut expected = Vec::with_capacity(total_frames);
-        let mut done = 0;
-        while done < total_frames {
-            let chunk = (total_frames - done).min(MAX_BLOCK_FRAMES);
-            reference.process_block(chunk);
-            expected.extend_from_slice(reference.output_channel(0));
-            done += chunk;
-        }
-
-        assert_eq!(output, expected, "chunk granularity changed the rendered signal");
-    }
-
-    #[test]
-    fn every_output_frame_is_written_when_the_buffer_exceeds_max_block_frames() {
-        let mut synth = synth_with_a_note_held();
+        let capture: SharedCapture = Arc::new(Mutex::new(None));
+        let mut scratch = [[0.0f32; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS];
         let num_channels = 1;
         let total_frames = MAX_BLOCK_FRAMES * 2 + 17;
-        let mut output = vec![f32::NAN; total_frames]; // sentinel: must all be overwritten
-        let mut scratch = no_external_scratch();
+        let mut output = vec![f32::NAN; total_frames];
 
-        process_frame(&mut output, &mut synth, num_channels, None, &mut scratch);
+        process_frame(
+            &mut output,
+            &mut synth,
+            num_channels,
+            &capture,
+            &mut scratch,
+        );
 
         assert!(
             output.iter().all(|s| !s.is_nan()),
-            "process_frame left {} of {total_frames} samples unwritten",
-            output.iter().filter(|s| s.is_nan()).count()
+            "process_frame left samples unwritten"
         );
+    }
+
+    #[test]
+    fn default_patch_declares_audio_in_and_out_endpoints() {
+        let synth = Synth::new(48_000.0);
+        let ids: Vec<&str> = synth.describe_io().iter().map(|e| e.id).collect();
+        assert!(ids.contains(&IO_ENDPOINT_AUDIO_OUT));
+        assert!(ids.contains(&IO_ENDPOINT_AUDIO_IN));
+        for ep in synth.describe_io() {
+            assert_eq!(ep.device, dsp::IO_DEVICE_DEFAULT);
+        }
     }
 }

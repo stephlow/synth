@@ -1,6 +1,6 @@
 use crate::module::{BlockContext, Module};
 use crate::modules::{Io, MidiToCv};
-use crate::patch::{DefaultPatch, ModuleInfo, Voice};
+use crate::patch::{DefaultPatch, IoEndpoint, ModuleInfo, Voice, IO_DEVICE_DEFAULT};
 use crate::MAX_BLOCK_FRAMES;
 use wmidi::{Note, Velocity};
 
@@ -12,6 +12,12 @@ const NUM_EXTERNAL_INPUT_CHANNELS: usize = 2;
 /// Master output channels: 0 = mixed audio, 1 = pitch CV, 2 = gate CV,
 /// 3 = spare/aux (silent, available for future patching).
 const NUM_MASTER_OUTPUT_CHANNELS: usize = 4;
+
+/// Sentinel module index for the master (non-voice-graph) `Io`. Control
+/// surfaces address master calibration knobs with this index via
+/// `set_param`; it is never a real graph module slot. Chosen to fit in
+/// the gRPC `uint32` module field (`u32::MAX`).
+pub const MASTER_IO_MODULE: usize = u32::MAX as usize;
 
 /// Polyphonic front-end: owns a fixed pool of identical patch-graph
 /// voices and allocates MIDI notes onto them (reusing a free+idle voice
@@ -36,6 +42,9 @@ pub struct Synth {
     /// list — for anything that wants to build a generic control surface
     /// (see `describe_patch`).
     patch_modules: Vec<ModuleInfo>,
+    /// Patch-owned hardware IO endpoints (device bindings + channel layout).
+    /// Mutated by `set_io_device`; the engine realizes the bindings.
+    io_endpoints: Vec<IoEndpoint>,
     /// External-input module index shared by every voice's (identical)
     /// patch, so `set_input_calibration` can target it directly.
     external_input_module: usize,
@@ -88,7 +97,7 @@ impl Synth {
         // identical across all of them; keep the first voice's copy as the
         // shared one.
         let patch = DefaultPatch;
-        let (first_voice, patch_modules) = Voice::new(&patch, sample_rate);
+        let (first_voice, patch_modules, io_endpoints) = Voice::new(&patch, sample_rate);
         let external_input_module = first_voice.external_input_module();
         let mut voices = Vec::with_capacity(NUM_VOICES);
         voices.push(first_voice);
@@ -99,6 +108,7 @@ impl Synth {
             voices_map: [None; NUM_VOICES],
             allocation_order: Vec::with_capacity(NUM_VOICES),
             patch_modules,
+            io_endpoints,
             external_input_module,
             sample_rate,
             voice_scratch: [0.0; MAX_BLOCK_FRAMES],
@@ -115,10 +125,56 @@ impl Synth {
 
     /// Broadcasts a parameter change to the matching module in every
     /// voice (e.g. a filter-cutoff CC should move all voices together).
+    /// `MASTER_IO_MODULE` routes to the master hardware `Io` instead.
     pub fn set_param(&mut self, module: usize, param: usize, value: f32) {
+        if module == MASTER_IO_MODULE {
+            self.master_io.set_param(param, value);
+            return;
+        }
         for voice in &mut self.voices {
             voice.set_param(module, param, value);
         }
+    }
+
+    /// Patch-owned hardware IO endpoints (device bindings + layout).
+    pub fn describe_io(&self) -> &[IoEndpoint] {
+        &self.io_endpoints
+    }
+
+    /// Updates the patch's device binding for `endpoint_id`. Returns
+    /// `false` if no such endpoint exists. Does not open hardware — the
+    /// engine realizes the new binding after this state change.
+    pub fn set_io_device(&mut self, endpoint_id: &str, device_name: &str) -> bool {
+        let Some(endpoint) = self
+            .io_endpoints
+            .iter_mut()
+            .find(|e| e.id == endpoint_id)
+        else {
+            return false;
+        };
+        endpoint.device = if device_name.is_empty() {
+            IO_DEVICE_DEFAULT.to_string()
+        } else {
+            device_name.to_string()
+        };
+        true
+    }
+
+    /// Absolute peak of the most recent block on each external-input
+    /// channel (pre-calibration capture staging). Used for IO meters.
+    pub fn external_input_peak(&self, channel: usize) -> f32 {
+        let frames = self.last_frames;
+        if frames == 0 {
+            return 0.0;
+        }
+        self.external_input
+            .get(channel)
+            .map(|buf| {
+                buf[..frames]
+                    .iter()
+                    .fold(0.0f32, |m, &s| m.max(s.abs()))
+            })
+            .unwrap_or(0.0)
     }
 
     /// Stages a block of externally-captured audio/CV on `channel` (must
@@ -159,6 +215,11 @@ impl Synth {
     /// hardcoding module indices. See `patch::ModuleInfo`.
     pub fn describe_patch(&self) -> &[ModuleInfo] {
         &self.patch_modules
+    }
+
+    /// How many external input channels the patch expects.
+    pub fn external_input_channels(&self) -> usize {
+        NUM_EXTERNAL_INPUT_CHANNELS
     }
 
     /// Picks a voice to (re)use for a new note on: prefer a slot that is
@@ -457,5 +518,40 @@ mod tests {
         // set_input_calibration's fan-out doesn't error for any voice.
         synth.write_external_input(1, &[1.0]);
         synth.process_block(1);
+    }
+
+    #[test]
+    fn set_io_device_updates_patch_binding() {
+        let mut synth = Synth::new(48_000.0);
+        assert!(synth.set_io_device("audio_out", "Mock Interface"));
+        let out = synth
+            .describe_io()
+            .iter()
+            .find(|e| e.id == "audio_out")
+            .unwrap();
+        assert_eq!(out.device, "Mock Interface");
+
+        assert!(synth.set_io_device("audio_in", ""));
+        let inn = synth
+            .describe_io()
+            .iter()
+            .find(|e| e.id == "audio_in")
+            .unwrap();
+        assert_eq!(inn.device, crate::patch::IO_DEVICE_DEFAULT);
+
+        assert!(!synth.set_io_device("nope", "x"));
+    }
+
+    #[test]
+    fn master_io_module_set_param_reaches_calibration() {
+        let mut synth = Synth::new(48_000.0);
+        synth.note_on(Note::try_from(81).unwrap(), velocity(100));
+        synth.set_param(MASTER_IO_MODULE, Io::param_send_scale(1), 0.1);
+        synth.process_block(1);
+        let calibrated = synth.output_channel(Synth::CHANNEL_PITCH_CV)[0];
+        assert!(
+            (calibrated - 0.1).abs() < 1e-4,
+            "expected pitch scale via MASTER_IO_MODULE, got {calibrated}"
+        );
     }
 }

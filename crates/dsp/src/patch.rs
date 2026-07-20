@@ -3,10 +3,18 @@ use crate::module::BlockContext;
 use crate::modules::{Attenuverter, Envelope, Io, Lfo, MidiToCv, Oscilloscope, Vca, Vcf, Vco};
 use crate::MAX_BLOCK_FRAMES;
 
+/// Stable endpoint id for the master hardware output (`Synth::master_io`).
+pub const IO_ENDPOINT_AUDIO_OUT: &str = "audio_out";
+/// Stable endpoint id for external capture into every voice's `Io`.
+pub const IO_ENDPOINT_AUDIO_IN: &str = "audio_in";
+/// Device name meaning "resolve the host default at open time".
+pub const IO_DEVICE_DEFAULT: &str = "default";
+
 /// Describes one parameter of a module a `Patch` placed in the graph, for
 /// anything that wants to build a generic control surface (a gRPC descriptor
 /// table, a MIDI CC map, a future patch-file format) without hardcoding
 /// module/param indices itself.
+#[derive(Clone, Debug)]
 pub struct ParamInfo {
     pub name: &'static str,
     pub param: usize,
@@ -21,10 +29,44 @@ pub struct ParamInfo {
 /// `Attenuverter` used as "Mod Depth" in one patch vs. a general-purpose
 /// utility in another), plus every parameter worth exposing on a control
 /// surface.
+#[derive(Clone, Debug)]
 pub struct ModuleInfo {
     pub module: usize,
     pub name: &'static str,
     pub kind: &'static str,
+    pub params: Vec<ParamInfo>,
+}
+
+/// Direction of a hardware-facing IO endpoint declared by a patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IoDirection {
+    /// Capture from a device into the graph (`Module::write_input`).
+    Input,
+    /// Send graph signals out to a device (master `Io` send channels).
+    Output,
+}
+
+/// Patch-owned binding for one hardware-facing `Io` endpoint. The engine
+/// realizes `device` by opening the matching cpal stream; runtime device
+/// changes mutate this binding (still patch state), then reopen hardware.
+#[derive(Clone, Debug)]
+pub struct IoEndpoint {
+    /// Stable id within the patch (`audio_out`, `audio_in`).
+    pub id: &'static str,
+    /// Display name for control surfaces ("Audio Out").
+    pub name: &'static str,
+    /// Style/grouping key for clients; always `"io"` for these endpoints.
+    pub kind: &'static str,
+    pub direction: IoDirection,
+    pub channels: usize,
+    /// cpal device name, or [`IO_DEVICE_DEFAULT`] / empty for host default.
+    pub device: String,
+    /// First physical device channel to map to endpoint channel 0.
+    pub device_channel_offset: usize,
+    /// Voice-graph module index when this Io lives in each voice; `None`
+    /// for master-level Io owned by `Synth` (e.g. audio out).
+    pub module: Option<usize>,
+    /// Calibration knobs (scale/offset) exposed on a control surface.
     pub params: Vec<ParamInfo>,
 }
 
@@ -48,6 +90,9 @@ pub struct BuiltPatch {
     pub output_tap: usize,
     /// Every module worth exposing on a control surface, in a stable order.
     pub modules: Vec<ModuleInfo>,
+    /// Hardware IO endpoints this patch owns (device bindings + layout).
+    /// Includes voice-graph capture and master-level send endpoints.
+    pub io_endpoints: Vec<IoEndpoint>,
 }
 
 /// A patch: owns building a voice graph and describing what it built, so
@@ -93,7 +138,9 @@ impl Patch for DefaultPatch {
         });
 
         let io_in = graph.add_module(Box::new(Io::new(0, 2))); // capture-only: 2 external-in channels
-        // Not exposed as a control: driven by hardware capture, not a knob.
+        // Device binding lives on `io_endpoints`; calibration knobs are
+        // listed there (and as ModuleInfo) so the control surface can
+        // show an "Audio In" IO module without hardcoding indices.
 
         let amp_env = graph.add_module(Box::new(Envelope::new(sample_rate, 0.01, 0.1, 0.7, 0.3)));
         modules.push(ModuleInfo {
@@ -175,6 +222,116 @@ impl Patch for DefaultPatch {
 
         graph.build(MAX_BLOCK_FRAMES);
 
+        // Capture calibration: one scale/offset pair per capture channel.
+        let audio_in_params = vec![
+            ParamInfo {
+                name: "Ch1 Scale",
+                param: Io::param_capture_scale(0),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Ch1 Offset",
+                param: Io::param_capture_offset(0),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+            ParamInfo {
+                name: "Ch2 Scale",
+                param: Io::param_capture_scale(1),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Ch2 Offset",
+                param: Io::param_capture_offset(1),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+        ];
+        modules.push(ModuleInfo {
+            module: io_in,
+            name: "Audio In",
+            kind: "io",
+            params: audio_in_params.clone(),
+        });
+
+        // Master send calibration (applied by Synth::master_io, not a
+        // voice-graph module — `module: None`). Channel 0 is mixed audio.
+        let audio_out_params = vec![
+            ParamInfo {
+                name: "Audio Scale",
+                param: Io::param_send_scale(0),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Audio Offset",
+                param: Io::param_send_offset(0),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+            ParamInfo {
+                name: "Pitch Scale",
+                param: Io::param_send_scale(1),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Pitch Offset",
+                param: Io::param_send_offset(1),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+            ParamInfo {
+                name: "Gate Scale",
+                param: Io::param_send_scale(2),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Gate Offset",
+                param: Io::param_send_offset(2),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+        ];
+
+        let io_endpoints = vec![
+            IoEndpoint {
+                id: IO_ENDPOINT_AUDIO_OUT,
+                name: "Audio Out",
+                kind: "io",
+                direction: IoDirection::Output,
+                channels: 4,
+                device: IO_DEVICE_DEFAULT.to_string(),
+                device_channel_offset: 0,
+                module: None,
+                params: audio_out_params,
+            },
+            IoEndpoint {
+                id: IO_ENDPOINT_AUDIO_IN,
+                name: "Audio In",
+                kind: "io",
+                direction: IoDirection::Input,
+                channels: 2,
+                device: IO_DEVICE_DEFAULT.to_string(),
+                device_channel_offset: 0,
+                module: Some(io_in),
+                params: audio_in_params,
+            },
+        ];
+
         BuiltPatch {
             graph,
             note_source: midi_to_cv,
@@ -182,6 +339,7 @@ impl Patch for DefaultPatch {
             external_input: io_in,
             output_tap,
             modules,
+            io_endpoints,
         }
     }
 }
@@ -210,10 +368,10 @@ pub struct Voice {
 
 impl Voice {
     /// Builds a voice from `patch`, returning it alongside the patch's full
-    /// module description (see `BuiltPatch::modules`) — callers that need
-    /// only one voice's worth of description (e.g. `Synth::new`, which
+    /// module description and IO endpoints (see `BuiltPatch`) — callers that
+    /// need only one voice's worth of description (e.g. `Synth::new`, which
     /// builds every voice from the same patch) can keep just the first.
-    pub fn new(patch: &dyn Patch, sample_rate: f32) -> (Self, Vec<ModuleInfo>) {
+    pub fn new(patch: &dyn Patch, sample_rate: f32) -> (Self, Vec<ModuleInfo>, Vec<IoEndpoint>) {
         let built = patch.build(sample_rate);
         let voice = Self {
             graph: built.graph,
@@ -223,7 +381,7 @@ impl Voice {
             tap: built.output_tap,
             sample_rate,
         };
-        (voice, built.modules)
+        (voice, built.modules, built.io_endpoints)
     }
 
     pub fn note_on(&mut self, freq_hz: f32, velocity: f32) {

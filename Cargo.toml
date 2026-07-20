@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/synth",
+    "crates/dsp",
     "crates/proto",
     "crates/engine",
     "crates/rack",
