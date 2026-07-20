@@ -17,8 +17,7 @@ service Synth {
   rpc NoteOn(NoteOnRequest) returns (Empty);
   rpc NoteOff(NoteOffRequest) returns (Empty);
 
-  // The fixed set of controls this engine exposes, so a generic client can
-  // render knobs without hardcoding module/param indices itself.
+  // The controls this engine exposes (module ids are stable patch ids).
   rpc ListControls(Empty) returns (ControlList);
 
   // Patch-owned hardware IO endpoints (device bindings + channel layout).
@@ -33,6 +32,25 @@ service Synth {
   // Live engine state (active voices, output level, IO meters), pushed
   // periodically.
   rpc StreamState(Empty) returns (stream EngineState);
+
+  // --- Dynamic patch topology (rebuilds voices off the audio path) ---
+
+  // Module kinds available to add (palette).
+  rpc ListModuleTypes(Empty) returns (ModuleTypeList);
+
+  // Full patch snapshot (modules, cables, roles, JSON).
+  rpc GetPatch(Empty) returns (PatchSnapshot);
+
+  rpc AddModule(AddModuleRequest) returns (PatchSnapshot);
+  rpc RemoveModule(RemoveModuleRequest) returns (PatchSnapshot);
+  // Named PatchConnect/PatchDisconnect so generated clients do not clash
+  // with tonic's transport `connect`.
+  rpc PatchConnect(ConnectRequest) returns (PatchSnapshot);
+  rpc PatchDisconnect(DisconnectRequest) returns (PatchSnapshot);
+
+  // Load/save the patch document as JSON (same format as GetPatch.document_json).
+  rpc LoadPatch(LoadPatchRequest) returns (PatchSnapshot);
+  rpc SavePatch(Empty) returns (SavePatchResponse);
 }
 
 message Empty {}
@@ -62,6 +80,7 @@ message NoteOffRequest {
 // param 0, range 20..10000, default 1200.
 message ControlDescriptor {
   string name = 1;
+  // Stable patch module id (not a dense graph index).
   uint32 module = 2;
   uint32 param = 3;
   float min = 4;
@@ -131,4 +150,94 @@ message EngineState {
   repeated float waveform = 3;
   // Per-endpoint live meters + resolved device status.
   repeated IoChannelMeter io_meters = 4;
+}
+
+message PortDescriptor {
+  string name = 1;
+  uint32 index = 2;
+}
+
+message ParamTypeDescriptor {
+  string name = 1;
+  uint32 index = 2;
+  float min = 3;
+  float max = 4;
+  float default_value = 5;
+}
+
+message ModuleType {
+  string kind = 1;
+  string display_name = 2;
+  repeated PortDescriptor inputs = 3;
+  repeated PortDescriptor outputs = 4;
+  repeated ParamTypeDescriptor params = 5;
+}
+
+message ModuleTypeList {
+  repeated ModuleType types = 1;
+}
+
+message ModuleInstanceDescriptor {
+  uint32 id = 1;
+  string kind = 2;
+  string name = 3;
+}
+
+message CableDescriptor {
+  uint32 id = 1;
+  uint32 src_module = 2;
+  uint32 src_port = 3;
+  uint32 dst_module = 4;
+  uint32 dst_port = 5;
+}
+
+message PatchRolesDescriptor {
+  uint32 note_source = 1;
+  uint32 activity_gate = 2;
+  uint32 external_input = 3;
+  uint32 output_tap_module = 4;
+  uint32 output_tap_port = 5;
+}
+
+message PatchSnapshot {
+  repeated ControlDescriptor controls = 1;
+  repeated CableDescriptor cables = 2;
+  repeated ModuleInstanceDescriptor modules = 3;
+  PatchRolesDescriptor roles = 4;
+  repeated IoEndpointDescriptor io_endpoints = 5;
+  // Full document JSON for save/file interchange.
+  string document_json = 6;
+}
+
+message AddModuleRequest {
+  string kind = 1;
+}
+
+message RemoveModuleRequest {
+  uint32 module_id = 1;
+}
+
+message ConnectRequest {
+  uint32 src_module = 1;
+  uint32 src_port = 2;
+  uint32 dst_module = 3;
+  uint32 dst_port = 4;
+}
+
+message DisconnectRequest {
+  // Prefer cable_id when known; otherwise match endpoints.
+  uint32 cable_id = 1;
+  uint32 src_module = 2;
+  uint32 src_port = 3;
+  uint32 dst_module = 4;
+  uint32 dst_port = 5;
+  bool use_cable_id = 6;
+}
+
+message LoadPatchRequest {
+  string document_json = 1;
+}
+
+message SavePatchResponse {
+  string document_json = 1;
 }

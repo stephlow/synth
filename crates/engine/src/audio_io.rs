@@ -248,13 +248,13 @@ pub fn status_from_endpoints(
     endpoints
         .iter()
         .map(|ep| {
-            let (connected, device_name) = match ep.id {
-                id if id == IO_ENDPOINT_AUDIO_OUT => (out_connected, out_resolved.to_string()),
-                id if id == IO_ENDPOINT_AUDIO_IN => (in_connected, in_resolved.to_string()),
+            let (connected, device_name) = match ep.id.as_str() {
+                IO_ENDPOINT_AUDIO_OUT => (out_connected, out_resolved.to_string()),
+                IO_ENDPOINT_AUDIO_IN => (in_connected, in_resolved.to_string()),
                 _ => (false, ep.device.clone()),
             };
             IoEndpointStatus {
-                endpoint_id: ep.id.to_string(),
+                endpoint_id: ep.id.clone(),
                 device_name,
                 connected,
                 channels: ep.channels,

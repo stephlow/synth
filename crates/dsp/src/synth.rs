@@ -1,6 +1,6 @@
 use crate::module::{BlockContext, Module};
 use crate::modules::{Io, MidiToCv};
-use crate::patch::{DefaultPatch, IoEndpoint, ModuleInfo, Voice, IO_DEVICE_DEFAULT};
+use crate::patch::{IoEndpoint, ModuleInfo, Patch, PatchError, Voice, IO_DEVICE_DEFAULT};
 use crate::MAX_BLOCK_FRAMES;
 use wmidi::{Note, Velocity};
 
@@ -37,16 +37,17 @@ pub struct Synth {
     /// Order in which voices were allocated, oldest first; used for voice
     /// stealing when every voice is busy.
     allocation_order: Vec<usize>,
-    /// Description of every voice's (identical) patch — the module/param
-    /// layout `Patch::build` actually produced, not a hand-kept-in-sync
-    /// list — for anything that wants to build a generic control surface
-    /// (see `describe_patch`).
+    /// Edit/serialize source of truth. Topology edits mutate this then rebuild
+    /// voices (control path only). Param changes update it and live graphs.
+    patch: Patch,
+    /// Description of every voice's (identical) patch — derived from `patch`
+    /// after the last compile (see `describe_patch`).
     patch_modules: Vec<ModuleInfo>,
     /// Patch-owned hardware IO endpoints (device bindings + channel layout).
     /// Mutated by `set_io_device`; the engine realizes the bindings.
     io_endpoints: Vec<IoEndpoint>,
-    /// External-input module index shared by every voice's (identical)
-    /// patch, so `set_input_calibration` can target it directly.
+    /// External-input module **dense graph index** shared by every voice,
+    /// so `set_input_calibration` can target it on the hot path.
     external_input_module: usize,
     sample_rate: f32,
 
@@ -93,22 +94,29 @@ impl Synth {
     pub const NUM_OUTPUT_CHANNELS: usize = NUM_MASTER_OUTPUT_CHANNELS;
 
     pub fn new(sample_rate: f32) -> Self {
-        // Every voice is built from the same patch, so its module layout is
-        // identical across all of them; keep the first voice's copy as the
-        // shared one.
-        let patch = DefaultPatch;
-        let (first_voice, patch_modules, io_endpoints) = Voice::new(&patch, sample_rate);
+        Self::from_patch(Patch::default(), sample_rate)
+            .expect("default patch must compile")
+    }
+
+    /// Builds a synth from an explicit patch document. Allocates — not for
+    /// the audio callback.
+    pub fn from_patch(patch: Patch, sample_rate: f32) -> Result<Self, PatchError> {
+        let (first_voice, meta) = Voice::new(&patch, sample_rate)?;
         let external_input_module = first_voice.external_input_module();
         let mut voices = Vec::with_capacity(NUM_VOICES);
         voices.push(first_voice);
-        voices.extend((1..NUM_VOICES).map(|_| Voice::new(&patch, sample_rate).0));
+        for _ in 1..NUM_VOICES {
+            let (v, _) = Voice::new(&patch, sample_rate)?;
+            voices.push(v);
+        }
 
-        Self {
+        Ok(Self {
             voices,
             voices_map: [None; NUM_VOICES],
             allocation_order: Vec::with_capacity(NUM_VOICES),
-            patch_modules,
-            io_endpoints,
+            patch,
+            patch_modules: meta.modules,
+            io_endpoints: meta.io_endpoints,
             external_input_module,
             sample_rate,
             voice_scratch: [0.0; MAX_BLOCK_FRAMES],
@@ -120,19 +128,32 @@ impl Synth {
             master_out_outputs: [0.0; NUM_MASTER_OUTPUT_CHANNELS * MAX_BLOCK_FRAMES],
             external_input: [[0.0; MAX_BLOCK_FRAMES]; NUM_EXTERNAL_INPUT_CHANNELS],
             last_frames: 0,
-        }
+        })
     }
 
-    /// Broadcasts a parameter change to the matching module in every
-    /// voice (e.g. a filter-cutoff CC should move all voices together).
-    /// `MASTER_IO_MODULE` routes to the master hardware `Io` instead.
+    /// The edit/serialize patch document (topology + params).
+    pub fn patch(&self) -> &Patch {
+        &self.patch
+    }
+
+    /// Broadcasts a parameter change to the matching module in every voice.
+    /// `module` is a **stable document id** (or [`MASTER_IO_MODULE`]).
+    /// Updates the document so save/load sees current knobs. No rebuild.
     pub fn set_param(&mut self, module: usize, param: usize, value: f32) {
         if module == MASTER_IO_MODULE {
             self.master_io.set_param(param, value);
             return;
         }
+        let module_id = module as u32;
+        let _ = self.patch.set_param(module_id, param, value);
+        // Keep control-surface defaults in sync for describe_patch consumers.
+        if let Some(info) = self.patch_modules.iter_mut().find(|m| m.module == module_id) {
+            if let Some(p) = info.params.iter_mut().find(|p| p.param == param) {
+                p.default_value = value;
+            }
+        }
         for voice in &mut self.voices {
-            voice.set_param(module, param, value);
+            voice.set_param_id(module_id, param, value);
         }
     }
 
@@ -145,6 +166,11 @@ impl Synth {
     /// `false` if no such endpoint exists. Does not open hardware — the
     /// engine realizes the new binding after this state change.
     pub fn set_io_device(&mut self, endpoint_id: &str, device_name: &str) -> bool {
+        let device = if device_name.is_empty() {
+            IO_DEVICE_DEFAULT.to_string()
+        } else {
+            device_name.to_string()
+        };
         let Some(endpoint) = self
             .io_endpoints
             .iter_mut()
@@ -152,12 +178,83 @@ impl Synth {
         else {
             return false;
         };
-        endpoint.device = if device_name.is_empty() {
-            IO_DEVICE_DEFAULT.to_string()
-        } else {
-            device_name.to_string()
-        };
+        endpoint.device = device.clone();
+        if let Some(doc_ep) = self.patch.io_endpoints.iter_mut().find(|e| e.id == endpoint_id) {
+            doc_ep.device = device;
+        }
         true
+    }
+
+    // --- Topology (control path only; allocates / rebuilds voices) -----------
+
+    /// Recompile all voices from the current document. Clears active notes.
+    fn rebuild_voices(&mut self) -> Result<(), PatchError> {
+        let (first, meta) = Voice::new(&self.patch, self.sample_rate)?;
+        self.external_input_module = first.external_input_module();
+        let mut voices = Vec::with_capacity(NUM_VOICES);
+        voices.push(first);
+        for _ in 1..NUM_VOICES {
+            let (v, _) = Voice::new(&self.patch, self.sample_rate)?;
+            voices.push(v);
+        }
+        self.voices = voices;
+        self.voices_map = [None; NUM_VOICES];
+        self.allocation_order.clear();
+        self.patch_modules = meta.modules;
+        self.io_endpoints = meta.io_endpoints;
+        Ok(())
+    }
+
+    pub fn add_module(&mut self, kind: &str) -> Result<u32, PatchError> {
+        let id = self.patch.add_module(kind)?;
+        self.rebuild_voices()?;
+        Ok(id)
+    }
+
+    pub fn remove_module(&mut self, id: u32) -> Result<(), PatchError> {
+        self.patch.remove_module(id)?;
+        self.rebuild_voices()
+    }
+
+    pub fn connect(
+        &mut self,
+        src_module: u32,
+        src_port: usize,
+        dst_module: u32,
+        dst_port: usize,
+    ) -> Result<u32, PatchError> {
+        let cable_id = self.patch.connect(src_module, src_port, dst_module, dst_port)?;
+        self.rebuild_voices()?;
+        Ok(cable_id)
+    }
+
+    pub fn disconnect(
+        &mut self,
+        src_module: u32,
+        src_port: usize,
+        dst_module: u32,
+        dst_port: usize,
+    ) -> Result<(), PatchError> {
+        self.patch
+            .disconnect(src_module, src_port, dst_module, dst_port)?;
+        self.rebuild_voices()
+    }
+
+    pub fn disconnect_cable(&mut self, cable_id: u32) -> Result<(), PatchError> {
+        self.patch.disconnect_by_id(cable_id)?;
+        self.rebuild_voices()
+    }
+
+    /// Replace the entire patch document and rebuild. Control path only.
+    pub fn load_patch(&mut self, patch: Patch) -> Result<(), PatchError> {
+        // Validate compile before swapping document.
+        let _ = patch.build(self.sample_rate)?;
+        self.patch = patch;
+        self.rebuild_voices()
+    }
+
+    pub fn save_patch_json(&self) -> Result<String, PatchError> {
+        self.patch.to_json()
     }
 
     /// Absolute peak of the most recent block on each external-input
@@ -204,8 +301,16 @@ impl Synth {
     /// this engine's internal units.
     pub fn set_input_calibration(&mut self, channel: usize, scale: f32, offset: f32) {
         for voice in &mut self.voices {
-            voice.set_param(self.external_input_module, Io::param_capture_scale(channel), scale);
-            voice.set_param(self.external_input_module, Io::param_capture_offset(channel), offset);
+            voice.set_param_index(
+                self.external_input_module,
+                Io::param_capture_scale(channel),
+                scale,
+            );
+            voice.set_param_index(
+                self.external_input_module,
+                Io::param_capture_offset(channel),
+                offset,
+            );
         }
     }
 
@@ -553,5 +658,22 @@ mod tests {
             (calibrated - 0.1).abs() < 1e-4,
             "expected pitch scale via MASTER_IO_MODULE, got {calibrated}"
         );
+    }
+
+    #[test]
+    fn add_module_and_reload_json() {
+        let mut synth = Synth::new(48_000.0);
+        let id = synth.add_module("mixer").unwrap();
+        assert!(synth.describe_patch().iter().any(|m| m.module == id));
+        let json = synth.save_patch_json().unwrap();
+        let mut synth2 = Synth::new(48_000.0);
+        synth2
+            .load_patch(Patch::from_json(&json).unwrap())
+            .unwrap();
+        assert!(synth2.describe_patch().iter().any(|m| m.module == id));
+        synth2.note_on(note(69), velocity(100));
+        synth2.process_block(64);
+        // Still produces finite output after load.
+        assert!(synth2.output_channel(0).iter().all(|s| s.is_finite()));
     }
 }

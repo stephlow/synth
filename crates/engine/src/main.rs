@@ -37,7 +37,7 @@ use dsp::{
 /// Address the gRPC server listens on; the `rack` TUI connects here.
 const GRPC_ADDR: &str = "127.0.0.1:50051";
 
-/// Control-plane requests to reopen hardware from patch device bindings.
+/// Control-plane requests: device reopen and off-audio-thread patch topology.
 #[derive(Debug)]
 pub enum IoControl {
     SetDevice {
@@ -45,6 +45,41 @@ pub enum IoControl {
         device_name: String,
         reply: std::sync::mpsc::Sender<Result<(), String>>,
     },
+    /// Mutate topology / load patch with exclusive access (stream dropped).
+    ApplyPatchOp {
+        op: PatchOp,
+        reply: std::sync::mpsc::Sender<Result<PatchApplyResult, String>>,
+    },
+}
+
+/// Topology / load operations applied off the audio callback.
+#[derive(Debug)]
+pub enum PatchOp {
+    AddModule { kind: String },
+    RemoveModule { id: u32 },
+    Connect {
+        src_module: u32,
+        src_port: u32,
+        dst_module: u32,
+        dst_port: u32,
+    },
+    Disconnect {
+        cable_id: Option<u32>,
+        src_module: u32,
+        src_port: u32,
+        dst_module: u32,
+        dst_port: u32,
+    },
+    LoadDocument { json: String },
+    /// Snapshot only (no rebuild); still takes exclusive access briefly.
+    GetSnapshot,
+}
+
+/// Result of a successful patch op (for gRPC tables + client refresh).
+#[derive(Debug, Clone)]
+pub struct PatchApplyResult {
+    pub document_json: String,
+    pub module_infos: Vec<ModuleInfo>,
 }
 
 /// Mutable DSP + command state accessed **only** from the output callback
@@ -246,6 +281,107 @@ impl IoRuntime {
         }
     }
 
+    /// Apply a topology op with exclusive AudioCore access (drops/reopens output).
+    fn apply_patch_op(&mut self, op: PatchOp) -> Result<PatchApplyResult, String> {
+        // Drop output so the callback joins and we own AudioInner exclusively.
+        self._output_stream = None;
+
+        // SAFETY: output stream is dropped; no callback can be running.
+        let inner = unsafe { &mut *self.core.inner.get() };
+
+        let result = (|| -> Result<PatchApplyResult, String> {
+            match op {
+                PatchOp::AddModule { kind } => {
+                    inner
+                        .synth
+                        .add_module(&kind)
+                        .map_err(|e| e.to_string())?;
+                }
+                PatchOp::RemoveModule { id } => {
+                    inner
+                        .synth
+                        .remove_module(id)
+                        .map_err(|e| e.to_string())?;
+                }
+                PatchOp::Connect {
+                    src_module,
+                    src_port,
+                    dst_module,
+                    dst_port,
+                } => {
+                    inner
+                        .synth
+                        .connect(
+                            src_module,
+                            src_port as usize,
+                            dst_module,
+                            dst_port as usize,
+                        )
+                        .map_err(|e| e.to_string())?;
+                }
+                PatchOp::Disconnect {
+                    cable_id,
+                    src_module,
+                    src_port,
+                    dst_module,
+                    dst_port,
+                } => {
+                    if let Some(id) = cable_id {
+                        inner
+                            .synth
+                            .disconnect_cable(id)
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        inner
+                            .synth
+                            .disconnect(
+                                src_module,
+                                src_port as usize,
+                                dst_module,
+                                dst_port as usize,
+                            )
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                PatchOp::LoadDocument { json } => {
+                    let patch = dsp::Patch::from_json(&json).map_err(|e| e.to_string())?;
+                    inner.synth.load_patch(patch).map_err(|e| e.to_string())?;
+                }
+                PatchOp::GetSnapshot => {}
+            }
+
+            // Refresh MIDI CC targets from the new topology (best-effort:
+            // missing kinds leave previous targets; resolve may panic on
+            // incomplete patches — use try_resolve pattern).
+            if let Ok(cc) = CcTargets::try_resolve(inner.synth.describe_patch()) {
+                inner.cc_targets = cc;
+            }
+
+            self.endpoints = inner.synth.describe_io().to_vec();
+
+            let document_json = inner
+                .synth
+                .save_patch_json()
+                .map_err(|e| e.to_string())?;
+            let module_infos = inner.synth.describe_patch().to_vec();
+            Ok(PatchApplyResult {
+                document_json,
+                module_infos,
+            })
+        })();
+
+        // Always try to reopen output so audio resumes even if op failed.
+        let endpoints = self.endpoints.clone();
+        if let Err(err) = self.reopen_output(&endpoints) {
+            if result.is_ok() {
+                return Err(format!("patch applied but failed to reopen output: {err}"));
+            }
+            // Prefer the original op error.
+        }
+
+        result
+    }
+
     fn reopen_output(&mut self, endpoints: &[IoEndpoint]) -> Result<(), String> {
         // Drop current output first so the callback finishes and we regain
         // exclusive access to AudioCore (Synth state preserved).
@@ -429,6 +565,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let result = io_runtime.set_device(&endpoint_id, &device_name);
                         let _ = reply.send(result);
                     }
+                    IoControl::ApplyPatchOp { op, reply } => {
+                        let result = io_runtime.apply_patch_op(op);
+                        let _ = reply.send(result);
+                    }
                 }
             }
         })?;
@@ -446,6 +586,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         meters,
         descriptors,
         io_descriptors,
+        probe,
     )
     .await?;
 
@@ -566,21 +707,25 @@ pub struct CcTargets {
 
 impl CcTargets {
     fn resolve(modules: &[ModuleInfo]) -> Self {
-        let module_of = |kind: &str| {
+        Self::try_resolve(modules).expect("default patch must expose MIDI CC target modules")
+    }
+
+    fn try_resolve(modules: &[ModuleInfo]) -> Result<Self, String> {
+        let module_of = |kind: &str| -> Result<usize, String> {
             modules
                 .iter()
                 .find(|m| m.kind == kind)
-                .unwrap_or_else(|| panic!("patch has no '{kind}' module for the MIDI CC map"))
-                .module
+                .map(|m| m.module as usize)
+                .ok_or_else(|| format!("patch has no '{kind}' module for the MIDI CC map"))
         };
         let targets = Self {
-            vcf: module_of("vcf"),
-            lfo: module_of("lfo"),
-            lfo_depth: module_of("attenuverter"),
-            amp_env: module_of("envelope"),
+            vcf: module_of("vcf")?,
+            lfo: module_of("lfo")?,
+            lfo_depth: module_of("attenuverter")?,
+            amp_env: module_of("envelope")?,
         };
         debug!(?targets, "resolved MIDI CC targets");
-        targets
+        Ok(targets)
     }
 }
 
@@ -724,7 +869,7 @@ mod tests {
     #[test]
     fn default_patch_declares_audio_in_and_out_endpoints() {
         let synth = Synth::new(48_000.0);
-        let ids: Vec<&str> = synth.describe_io().iter().map(|e| e.id).collect();
+        let ids: Vec<&str> = synth.describe_io().iter().map(|e| e.id.as_str()).collect();
         assert!(ids.contains(&IO_ENDPOINT_AUDIO_OUT));
         assert!(ids.contains(&IO_ENDPOINT_AUDIO_IN));
         for ep in synth.describe_io() {

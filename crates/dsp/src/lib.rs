@@ -3,13 +3,15 @@ pub mod midi;
 pub mod module;
 pub mod modules;
 pub mod patch;
+pub mod registry;
 pub mod rt;
 pub mod synth;
 
 pub use patch::{
-    IoDirection, IoEndpoint, ModuleInfo, ParamInfo, Patch, IO_DEVICE_DEFAULT, IO_ENDPOINT_AUDIO_IN,
-    IO_ENDPOINT_AUDIO_OUT,
+    Cable, IoDirection, IoEndpoint, ModuleInfo, ModuleInstance, ParamInfo, Patch, PatchError,
+    PatchRoles, IO_DEVICE_DEFAULT, IO_ENDPOINT_AUDIO_IN, IO_ENDPOINT_AUDIO_OUT,
 };
+pub use registry::{ModuleTypeInfo, ParamMeta, PortMeta};
 pub use synth::{Synth, MASTER_IO_MODULE};
 
 /// Every voice graph is built to handle blocks up to this many frames in

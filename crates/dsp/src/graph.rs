@@ -111,6 +111,35 @@ impl Graph {
         });
     }
 
+    /// Removes one cable matching the given endpoints. Returns whether a
+    /// cable was removed. Marks the graph unbuilt (call [`Graph::build`] again).
+    pub fn disconnect(
+        &mut self,
+        src_mod: usize,
+        src_port: usize,
+        dst_mod: usize,
+        dst_port: usize,
+    ) -> bool {
+        let before = self.connections.len();
+        self.connections.retain(|c| {
+            !(c.src_mod == src_mod
+                && c.src_port == src_port
+                && c.dst_mod == dst_mod
+                && c.dst_port == dst_port)
+        });
+        if self.connections.len() != before {
+            self.built = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Number of cables currently in the graph (for tests / tooling).
+    pub fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
     /// Registers a module output as readable after `process_block`,
     /// returning a tap index for use with `tap()`. A graph can have any
     /// number of taps.
@@ -429,6 +458,25 @@ mod tests {
         graph.process_block(&ctx(4));
         assert_eq!(graph.tap(tap_a), [2.0; 4]);
         assert_eq!(graph.tap(tap_b), [5.0; 4]);
+    }
+
+    #[test]
+    fn disconnect_removes_a_cable() {
+        let mut graph = Graph::new();
+        let src = graph.add_module(Box::new(Const(2.0)));
+        let gain = graph.add_module(Box::new(Gain(3.0)));
+        graph.connect(src, 0, gain, 0);
+        let tap = graph.add_tap(gain, 0);
+        graph.build(64);
+        graph.process_block(&ctx(4));
+        assert_eq!(graph.tap(tap), [6.0; 4]);
+
+        assert!(graph.disconnect(src, 0, gain, 0));
+        graph.build(64);
+        graph.process_block(&ctx(4));
+        // Unpatched input is silence.
+        assert_eq!(graph.tap(tap), [0.0; 4]);
+        assert!(!graph.disconnect(src, 0, gain, 0));
     }
 
     #[test]

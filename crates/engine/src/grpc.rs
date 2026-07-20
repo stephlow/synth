@@ -1,22 +1,25 @@
 //! The gRPC server side: turns `synth-proto` requests into `Command`s sent
 //! to the audio worker, and turns `EngineMeters` into a `StreamState`
-//! stream. Device open/close is delegated to the IO control thread via
-//! `IoControl` — never done on the audio path.
+//! stream. Device open/close and patch topology are delegated to the IO
+//! control thread via `IoControl` — never done on the audio path.
 
 use std::pin::Pin;
 use std::sync::mpsc::Sender;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use dsp::{
-    Command, EngineMeters, IoDirection, Synth, IO_ENDPOINT_AUDIO_IN, IO_ENDPOINT_AUDIO_OUT,
-    MASTER_IO_MODULE,
+    registry, Command, EngineMeters, IoDirection, Synth, IO_ENDPOINT_AUDIO_IN,
+    IO_ENDPOINT_AUDIO_OUT, MASTER_IO_MODULE,
 };
 use synth_proto::synth_server::{Synth as SynthRpc, SynthServer};
 use synth_proto::{
-    AudioDevice, AudioDeviceList, CalibrationRequest, ControlDescriptor, ControlList, Empty,
-    EngineState, IoChannelMeter, IoEndpointDescriptor, IoEndpointList, NoteOffRequest,
-    NoteOnRequest, SetIoDeviceRequest, SetParamRequest,
+    AddModuleRequest, AudioDevice, AudioDeviceList, CableDescriptor, CalibrationRequest,
+    ConnectRequest, ControlDescriptor, ControlList, DisconnectRequest, Empty, EngineState,
+    IoChannelMeter, IoEndpointDescriptor, IoEndpointList, LoadPatchRequest, ModuleInstanceDescriptor,
+    ModuleType, ModuleTypeList, NoteOffRequest, NoteOnRequest, ParamTypeDescriptor, PatchRolesDescriptor,
+    PatchSnapshot, PortDescriptor, RemoveModuleRequest, SavePatchResponse, SetIoDeviceRequest,
+    SetParamRequest,
 };
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -24,7 +27,14 @@ use tonic::{transport::Server, Request, Response, Status};
 use tracing::{debug, error, info};
 
 use crate::audio_io::list_audio_devices;
-use crate::IoControl;
+use crate::{IoControl, PatchOp};
+
+/// Shared control/IO descriptor tables refreshed after topology edits.
+#[derive(Clone, Default)]
+pub struct ControlTables {
+    pub controls: Vec<ControlDescriptor>,
+    pub io_endpoints: Vec<IoEndpointDescriptor>,
+}
 
 /// Builds the control descriptor table this engine exposes over gRPC by
 /// translating `Synth::describe_patch()` plus master IO calibration knobs
@@ -40,8 +50,8 @@ pub fn build_control_descriptors(probe: &Synth) -> Vec<ControlDescriptor> {
         .flat_map(|module_info| {
             debug!(
                 module = module_info.module,
-                name = module_info.name,
-                kind = module_info.kind,
+                name = %module_info.name,
+                kind = %module_info.kind,
                 param_count = module_info.params.len(),
                 "module described"
             );
@@ -49,14 +59,14 @@ pub fn build_control_descriptors(probe: &Synth) -> Vec<ControlDescriptor> {
                 .params
                 .iter()
                 .map(move |param_info| ControlDescriptor {
-                    name: param_info.name.into(),
-                    module: module_info.module as u32,
+                    name: param_info.name.clone(),
+                    module: module_info.module,
                     param: param_info.param as u32,
                     min: param_info.min,
                     max: param_info.max,
                     default_value: param_info.default_value,
-                    module_name: module_info.name.into(),
-                    module_kind: module_info.kind.into(),
+                    module_name: module_info.name.clone(),
+                    module_kind: module_info.kind.clone(),
                 })
         })
         .collect();
@@ -69,14 +79,14 @@ pub fn build_control_descriptors(probe: &Synth) -> Vec<ControlDescriptor> {
     {
         for param_info in &out.params {
             descriptors.push(ControlDescriptor {
-                name: param_info.name.into(),
+                name: param_info.name.clone(),
                 module: MASTER_IO_MODULE as u32,
                 param: param_info.param as u32,
                 min: param_info.min,
                 max: param_info.max,
                 default_value: param_info.default_value,
-                module_name: out.name.into(),
-                module_kind: out.kind.into(),
+                module_name: out.name.clone(),
+                module_kind: out.kind.clone(),
             });
         }
     }
@@ -90,8 +100,8 @@ pub fn build_io_descriptors(probe: &Synth) -> Vec<IoEndpointDescriptor> {
         .describe_io()
         .iter()
         .map(|ep| IoEndpointDescriptor {
-            id: ep.id.into(),
-            name: ep.name.into(),
+            id: ep.id.clone(),
+            name: ep.name.clone(),
             direction: match ep.direction {
                 IoDirection::Input => "input".into(),
                 IoDirection::Output => "output".into(),
@@ -102,12 +112,89 @@ pub fn build_io_descriptors(probe: &Synth) -> Vec<IoEndpointDescriptor> {
         .collect()
 }
 
+fn build_module_type_list() -> ModuleTypeList {
+    let types = registry::all_types()
+        .into_iter()
+        .map(|t| ModuleType {
+            kind: t.kind.into(),
+            display_name: t.display_name.into(),
+            inputs: t
+                .inputs
+                .iter()
+                .map(|p| PortDescriptor {
+                    name: p.name.into(),
+                    index: p.index as u32,
+                })
+                .collect(),
+            outputs: t
+                .outputs
+                .iter()
+                .map(|p| PortDescriptor {
+                    name: p.name.into(),
+                    index: p.index as u32,
+                })
+                .collect(),
+            params: t
+                .params
+                .iter()
+                .map(|p| ParamTypeDescriptor {
+                    name: p.name.into(),
+                    index: p.index as u32,
+                    min: p.min,
+                    max: p.max,
+                    default_value: p.default,
+                })
+                .collect(),
+        })
+        .collect();
+    ModuleTypeList { types }
+}
+
+fn snapshot_from_json(
+    document_json: &str,
+    tables: &ControlTables,
+) -> Result<PatchSnapshot, Status> {
+    let patch = dsp::Patch::from_json(document_json)
+        .map_err(|e| Status::invalid_argument(e.to_string()))?;
+    Ok(PatchSnapshot {
+        controls: tables.controls.clone(),
+        cables: patch
+            .cables
+            .iter()
+            .map(|c| CableDescriptor {
+                id: c.id,
+                src_module: c.src_module,
+                src_port: c.src_port as u32,
+                dst_module: c.dst_module,
+                dst_port: c.dst_port as u32,
+            })
+            .collect(),
+        modules: patch
+            .modules
+            .iter()
+            .map(|m| ModuleInstanceDescriptor {
+                id: m.id,
+                kind: m.kind.clone(),
+                name: m.name.clone(),
+            })
+            .collect(),
+        roles: Some(PatchRolesDescriptor {
+            note_source: patch.roles.note_source,
+            activity_gate: patch.roles.activity_gate,
+            external_input: patch.roles.external_input,
+            output_tap_module: patch.roles.output_tap_module,
+            output_tap_port: patch.roles.output_tap_port as u32,
+        }),
+        io_endpoints: tables.io_endpoints.clone(),
+        document_json: document_json.to_string(),
+    })
+}
+
 pub struct SynthService {
     tx: Sender<Command>,
     io_tx: Sender<IoControl>,
     meters: Arc<EngineMeters>,
-    descriptors: Vec<ControlDescriptor>,
-    io_descriptors: Vec<IoEndpointDescriptor>,
+    tables: Arc<RwLock<ControlTables>>,
 }
 
 impl SynthService {
@@ -116,6 +203,91 @@ impl SynthService {
             error!("failed to send command: audio thread is no longer running");
             Status::internal("audio thread is no longer running")
         })
+    }
+
+    fn apply_op(&self, op: PatchOp) -> Result<PatchSnapshot, Status> {
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        self.io_tx
+            .send(IoControl::ApplyPatchOp {
+                op,
+                reply: reply_tx,
+            })
+            .map_err(|_| Status::internal("IO control thread is no longer running"))?;
+
+        let result = reply_rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| Status::deadline_exceeded("timed out applying patch operation"))?
+            .map_err(Status::failed_precondition)?;
+
+        // Rebuild descriptor tables from the applied document + probe modules.
+        // Controls must include master IO; reconstruct via a temporary synth
+        // would re-open audio — instead merge module infos with existing
+        // master-out controls pattern.
+        let patch = dsp::Patch::from_json(&result.document_json)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let mut controls: Vec<ControlDescriptor> = result
+            .module_infos
+            .iter()
+            .flat_map(|module_info| {
+                module_info.params.iter().map(move |param_info| ControlDescriptor {
+                    name: param_info.name.clone(),
+                    module: module_info.module,
+                    param: param_info.param as u32,
+                    min: param_info.min,
+                    max: param_info.max,
+                    default_value: param_info.default_value,
+                    module_name: module_info.name.clone(),
+                    module_kind: module_info.kind.clone(),
+                })
+            })
+            .collect();
+
+        // Preserve master Audio Out calibration knobs from previous tables
+        // (or rebuild from patch io endpoints).
+        if let Some(out) = patch
+            .io_endpoints
+            .iter()
+            .find(|e| e.id == IO_ENDPOINT_AUDIO_OUT)
+        {
+            for param_info in &out.params {
+                controls.push(ControlDescriptor {
+                    name: param_info.name.clone(),
+                    module: MASTER_IO_MODULE as u32,
+                    param: param_info.param as u32,
+                    min: param_info.min,
+                    max: param_info.max,
+                    default_value: param_info.default_value,
+                    module_name: out.name.clone(),
+                    module_kind: out.kind.clone(),
+                });
+            }
+        }
+
+        let io_endpoints: Vec<IoEndpointDescriptor> = patch
+            .io_endpoints
+            .iter()
+            .map(|ep| IoEndpointDescriptor {
+                id: ep.id.clone(),
+                name: ep.name.clone(),
+                direction: match ep.direction {
+                    IoDirection::Input => "input".into(),
+                    IoDirection::Output => "output".into(),
+                },
+                channels: ep.channels as u32,
+                device_name: ep.device.clone(),
+            })
+            .collect();
+
+        let tables = ControlTables {
+            controls,
+            io_endpoints,
+        };
+        if let Ok(mut guard) = self.tables.write() {
+            *guard = tables.clone();
+        }
+
+        snapshot_from_json(&result.document_json, &tables)
     }
 }
 
@@ -180,19 +352,25 @@ impl SynthRpc for SynthService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<ControlList>, Status> {
-        debug!(count = self.descriptors.len(), "list_controls");
-        Ok(Response::new(ControlList {
-            controls: self.descriptors.clone(),
-        }))
+        let controls = self
+            .tables
+            .read()
+            .map(|t| t.controls.clone())
+            .unwrap_or_default();
+        debug!(count = controls.len(), "list_controls");
+        Ok(Response::new(ControlList { controls }))
     }
 
     async fn list_io_endpoints(
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<IoEndpointList>, Status> {
-        // Merge patch descriptors with live resolved device names from meters.
         let status = self.meters.io_status();
-        let mut endpoints = self.io_descriptors.clone();
+        let mut endpoints = self
+            .tables
+            .read()
+            .map(|t| t.io_endpoints.clone())
+            .unwrap_or_default();
         for ep in &mut endpoints {
             if let Some(s) = status.iter().find(|s| s.endpoint_id == ep.id) {
                 if !s.device_name.is_empty() {
@@ -231,13 +409,11 @@ impl SynthRpc for SynthService {
             "set_io_device"
         );
 
-        // Update patch state on the audio worker first.
         self.send(Command::SetIoDevice {
             endpoint_id: req.endpoint_id.clone(),
             device_name: req.device_name.clone(),
         })?;
 
-        // Realize hardware on the IO control thread.
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
         self.io_tx
             .send(IoControl::SetDevice {
@@ -247,13 +423,108 @@ impl SynthRpc for SynthService {
             })
             .map_err(|_| Status::internal("IO control thread is no longer running"))?;
 
-        // Blocking wait is fine here: we're on the gRPC worker, not audio.
         let result = reply_rx
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| Status::deadline_exceeded("timed out reopening audio device"))?;
 
         result.map_err(Status::failed_precondition)?;
         Ok(Response::new(Empty {}))
+    }
+
+    async fn list_module_types(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<ModuleTypeList>, Status> {
+        Ok(Response::new(build_module_type_list()))
+    }
+
+    async fn get_patch(&self, _request: Request<Empty>) -> Result<Response<PatchSnapshot>, Status> {
+        let snap = self.apply_op(PatchOp::GetSnapshot)?;
+        Ok(Response::new(snap))
+    }
+
+    async fn add_module(
+        &self,
+        request: Request<AddModuleRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let kind = request.into_inner().kind;
+        debug!(%kind, "add_module");
+        let snap = self.apply_op(PatchOp::AddModule { kind })?;
+        Ok(Response::new(snap))
+    }
+
+    async fn remove_module(
+        &self,
+        request: Request<RemoveModuleRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let id = request.into_inner().module_id;
+        debug!(id, "remove_module");
+        let snap = self.apply_op(PatchOp::RemoveModule { id })?;
+        Ok(Response::new(snap))
+    }
+
+    async fn patch_connect(
+        &self,
+        request: Request<ConnectRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let req = request.into_inner();
+        debug!(
+            src = req.src_module,
+            dst = req.dst_module,
+            "patch_connect"
+        );
+        let snap = self.apply_op(PatchOp::Connect {
+            src_module: req.src_module,
+            src_port: req.src_port,
+            dst_module: req.dst_module,
+            dst_port: req.dst_port,
+        })?;
+        Ok(Response::new(snap))
+    }
+
+    async fn patch_disconnect(
+        &self,
+        request: Request<DisconnectRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let req = request.into_inner();
+        let snap = if req.use_cable_id {
+            self.apply_op(PatchOp::Disconnect {
+                cable_id: Some(req.cable_id),
+                src_module: 0,
+                src_port: 0,
+                dst_module: 0,
+                dst_port: 0,
+            })?
+        } else {
+            self.apply_op(PatchOp::Disconnect {
+                cable_id: None,
+                src_module: req.src_module,
+                src_port: req.src_port,
+                dst_module: req.dst_module,
+                dst_port: req.dst_port,
+            })?
+        };
+        Ok(Response::new(snap))
+    }
+
+    async fn load_patch(
+        &self,
+        request: Request<LoadPatchRequest>,
+    ) -> Result<Response<PatchSnapshot>, Status> {
+        let json = request.into_inner().document_json;
+        debug!(bytes = json.len(), "load_patch");
+        let snap = self.apply_op(PatchOp::LoadDocument { json })?;
+        Ok(Response::new(snap))
+    }
+
+    async fn save_patch(
+        &self,
+        _request: Request<Empty>,
+    ) -> Result<Response<SavePatchResponse>, Status> {
+        let snap = self.apply_op(PatchOp::GetSnapshot)?;
+        Ok(Response::new(SavePatchResponse {
+            document_json: snap.document_json,
+        }))
     }
 
     type StreamStateStream =
@@ -319,13 +590,17 @@ pub async fn serve(
     meters: Arc<EngineMeters>,
     descriptors: Vec<ControlDescriptor>,
     io_descriptors: Vec<IoEndpointDescriptor>,
+    _probe: Synth,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let tables = Arc::new(RwLock::new(ControlTables {
+        controls: descriptors,
+        io_endpoints: io_descriptors,
+    }));
     let service = SynthService {
         tx,
         io_tx,
         meters,
-        descriptors,
-        io_descriptors,
+        tables,
     };
     debug!(addr, "starting gRPC server");
     let result = Server::builder()
