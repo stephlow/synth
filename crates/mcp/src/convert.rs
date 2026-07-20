@@ -46,6 +46,7 @@ pub fn module_type(t: &ModuleType) -> Value {
             "min": p.min,
             "max": p.max,
             "default_value": p.default_value,
+            "choices": p.choices,
         })).collect::<Vec<_>>(),
     })
 }
@@ -55,20 +56,15 @@ pub fn module_types(list: &[ModuleType]) -> Value {
 }
 
 pub fn io_endpoint(e: &IoEndpointDescriptor) -> Value {
-    let mut v = json!({
+    let coords = e.coordinates.as_ref().map(|c| json!({ "x": c.x, "y": c.y }));
+    json!({
         "id": e.id,
         "name": e.name,
         "direction": e.direction,
         "channels": e.channels,
         "device_name": e.device_name,
-    });
-    if let Some(c) = e.coordinates.as_ref() {
-        v.as_object_mut().unwrap().insert(
-            "coordinates".into(),
-            json!({ "x": c.x, "y": c.y }),
-        );
-    }
-    v
+        "coordinates": coords,
+    })
 }
 
 pub fn io_endpoints(list: &[IoEndpointDescriptor]) -> Value {
@@ -90,18 +86,13 @@ pub fn audio_devices(list: &[AudioDevice]) -> Value {
 }
 
 fn module_instance(m: &ModuleInstanceDescriptor) -> Value {
-    let mut v = json!({
+    let coords = m.coordinates.as_ref().map(|c| json!({ "x": c.x, "y": c.y }));
+    json!({
         "id": m.id,
         "kind": m.kind,
         "name": m.name,
-    });
-    if let Some(c) = m.coordinates.as_ref() {
-        v.as_object_mut().unwrap().insert(
-            "coordinates".into(),
-            json!({ "x": c.x, "y": c.y }),
-        );
-    }
-    v
+        "coordinates": coords,
+    })
 }
 
 fn cable(c: &CableDescriptor) -> Value {

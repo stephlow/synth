@@ -185,11 +185,17 @@ impl AudioCore {
             &mut inner.external_scratch,
         );
 
-        let peak = inner
+        let peak_l = inner
             .synth
-            .output_channel(Synth::CHANNEL_AUDIO)
+            .output_channel(Synth::CHANNEL_AUDIO_L)
             .iter()
             .fold(0.0f32, |m, &s| m.max(s.abs()));
+        let peak_r = inner
+            .synth
+            .output_channel(Synth::CHANNEL_AUDIO_R)
+            .iter()
+            .fold(0.0f32, |m, &s| m.max(s.abs()));
+        let peak = peak_l.max(peak_r);
         self.meters
             .update(peak, inner.synth.active_voice_count());
         self.meters
@@ -718,35 +724,42 @@ impl Default for OutputCalibration {
     }
 }
 
-#[derive(Debug)]
+/// Best-effort MIDI CC map: each target is optional so incomplete patches
+/// (e.g. default without attenuverter) still boot; unbound CCs are ignored.
+#[derive(Debug, Default, Clone)]
 pub struct CcTargets {
-    vcf: usize,
-    lfo: usize,
-    lfo_depth: usize,
-    amp_env: usize,
+    vcf: Option<usize>,
+    lfo: Option<usize>,
+    lfo_depth: Option<usize>,
+    amp_env: Option<usize>,
 }
 
 impl CcTargets {
     fn resolve(modules: &[ModuleInfo]) -> Self {
-        Self::try_resolve(modules).expect("default patch must expose MIDI CC target modules")
-    }
-
-    fn try_resolve(modules: &[ModuleInfo]) -> Result<Self, String> {
-        let module_of = |kind: &str| -> Result<usize, String> {
+        let module_of = |kind: &str| -> Option<usize> {
             modules
                 .iter()
                 .find(|m| m.kind == kind)
                 .map(|m| m.module as usize)
-                .ok_or_else(|| format!("patch has no '{kind}' module for the MIDI CC map"))
         };
+        // Prefer the first envelope named like amp when several exist.
+        let amp_env = modules
+            .iter()
+            .find(|m| m.kind == "envelope" && m.name.to_ascii_lowercase().contains("amp"))
+            .or_else(|| modules.iter().find(|m| m.kind == "envelope"))
+            .map(|m| m.module as usize);
         let targets = Self {
-            vcf: module_of("vcf")?,
-            lfo: module_of("lfo")?,
-            lfo_depth: module_of("attenuverter")?,
-            amp_env: module_of("envelope")?,
+            vcf: module_of("vcf"),
+            lfo: module_of("lfo"),
+            lfo_depth: module_of("attenuverter"),
+            amp_env,
         };
         debug!(?targets, "resolved MIDI CC targets");
-        Ok(targets)
+        targets
+    }
+
+    fn try_resolve(modules: &[ModuleInfo]) -> Result<Self, String> {
+        Ok(Self::resolve(modules))
     }
 }
 
@@ -761,22 +774,32 @@ fn apply_control_change(
 
     match controller {
         74 => {
-            let cutoff = 20.0 * (500.0f32).powf(normalized);
-            synth.set_param(targets.vcf, Vcf::PARAM_CUTOFF, cutoff);
+            if let Some(vcf) = targets.vcf {
+                let cutoff = 20.0 * (500.0f32).powf(normalized);
+                synth.set_param(vcf, Vcf::PARAM_CUTOFF, cutoff);
+            }
         }
         71 => {
-            synth.set_param(targets.vcf, Vcf::PARAM_RESONANCE, normalized);
+            if let Some(vcf) = targets.vcf {
+                synth.set_param(vcf, Vcf::PARAM_RESONANCE, normalized);
+            }
         }
         1 => {
-            synth.set_param(targets.lfo_depth, Attenuverter::PARAM_SCALE, normalized * 2.0);
+            if let Some(depth) = targets.lfo_depth {
+                synth.set_param(depth, Attenuverter::PARAM_SCALE, normalized * 2.0);
+            }
         }
         76 => {
-            let rate = 0.1 * (200.0f32).powf(normalized);
-            synth.set_param(targets.lfo, Lfo::PARAM_RATE, rate);
+            if let Some(lfo) = targets.lfo {
+                let rate = 0.1 * (200.0f32).powf(normalized);
+                synth.set_param(lfo, Lfo::PARAM_RATE, rate);
+            }
         }
         72 => {
-            let release = 0.01 + normalized * 5.0;
-            synth.set_param(targets.amp_env, Envelope::PARAM_RELEASE, release);
+            if let Some(env) = targets.amp_env {
+                let release = 0.01 + normalized * 5.0;
+                synth.set_param(env, Envelope::PARAM_RELEASE, release);
+            }
         }
         20 => {
             calibration.pitch_scale = normalized;

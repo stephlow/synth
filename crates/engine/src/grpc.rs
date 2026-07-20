@@ -111,9 +111,9 @@ pub fn build_io_descriptors(probe: &Synth) -> Vec<IoEndpointDescriptor> {
             },
             channels: ep.channels as u32,
             device_name: ep.device.clone(),
-            coordinates: ep.coordinates.map(|c| ProtoModuleCoordinates {
-                x: c.x,
-                y: c.y,
+            coordinates: Some(ProtoModuleCoordinates {
+                x: ep.coordinates.x,
+                y: ep.coordinates.y,
             }),
         })
         .collect()
@@ -150,6 +150,7 @@ fn build_module_type_list() -> ModuleTypeList {
                     min: p.min,
                     max: p.max,
                     default_value: p.default,
+                    choices: p.choices.iter().map(|s| (*s).into()).collect(),
                 })
                 .collect(),
         })
@@ -183,9 +184,9 @@ fn snapshot_from_json(
                 id: m.id,
                 kind: m.kind.clone(),
                 name: m.name.clone(),
-                coordinates: m.coordinates.map(|c| ProtoModuleCoordinates {
-                    x: c.x,
-                    y: c.y,
+                coordinates: Some(ProtoModuleCoordinates {
+                    x: m.coordinates.x,
+                    y: m.coordinates.y,
                 }),
             })
             .collect(),
@@ -306,9 +307,9 @@ impl SynthService {
                 },
                 channels: ep.channels as u32,
                 device_name: ep.device.clone(),
-                coordinates: ep.coordinates.map(|c| ProtoModuleCoordinates {
-                    x: c.x,
-                    y: c.y,
+                coordinates: Some(ProtoModuleCoordinates {
+                    x: ep.coordinates.x,
+                    y: ep.coordinates.y,
                 }),
             })
             .collect();

@@ -59,7 +59,19 @@ pub fn draw_screen(frame: &mut Frame, app: &App) {
     if let Some(ci) = app.param_edit {
         if let Some(c) = app.controls.get(ci) {
             let v = app.values.get(ci).copied().unwrap_or(0.0);
-            draw_param_edit(frame, canvas, "PARAM", &c.name, v, c.min, c.max);
+            let shown = app.format_param(ci);
+            let discrete = crate::param_fmt::is_discrete(c, &app.module_types);
+            draw_param_edit(
+                frame,
+                canvas,
+                "PARAM",
+                &c.name,
+                v,
+                c.min,
+                c.max,
+                &shown,
+                discrete,
+            );
         }
     } else if let Some(menu) = app.menu_stack.last() {
         draw_menu(frame, canvas, menu);

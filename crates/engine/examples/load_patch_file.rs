@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .coordinates
             .as_ref()
             .map(|c| format!("({},{})", c.x, c.y))
-            .unwrap_or_else(|| "-".into());
+            .unwrap_or_else(|| "(0,0)".into());
         println!("  {} {} {}", m.id, m.name, c);
     }
     Ok(())

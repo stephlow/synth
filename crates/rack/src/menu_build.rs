@@ -1,9 +1,7 @@
 //! Build context-sensitive command menus from App state.
 
 use crate::app::App;
-use crate::model::{
-    Item, MenuAction, MenuEntry, MenuState, ModuleId,
-};
+use crate::model::{Item, MenuAction, MenuEntry, MenuState, ModuleId};
 
 /// Root menu for the cell under the cursor.
 pub fn root_menu(app: &App) -> MenuState {
@@ -24,16 +22,15 @@ pub fn root_menu(app: &App) -> MenuState {
 }
 
 fn empty_cell_menu() -> MenuState {
-    MenuState {
-        title: "empty".into(),
-        selected: 0,
-        items: vec![
+    MenuState::new(
+        "empty",
+        vec![
             MenuEntry::submenu("Add module…", MenuAction::OpenAddKinds),
             MenuEntry::submenu("Theme…", MenuAction::OpenThemes),
             MenuEntry::action("Save patch", MenuAction::SavePatch),
             MenuEntry::action("Load patch", MenuAction::LoadPatch),
         ],
-    }
+    )
 }
 
 fn append_rack_actions(items: &mut Vec<MenuEntry>) {
@@ -53,14 +50,12 @@ pub fn themes_menu(app: &App) -> MenuState {
             MenuAction::SetTheme { theme_index: i },
         ));
     }
-    MenuState {
-        title: "theme".into(),
-        selected: ThemeId::ALL
-            .iter()
-            .position(|t| *t == app.theme_id)
-            .unwrap_or(0),
-        items,
-    }
+    let mut menu = MenuState::new("theme", items);
+    menu.selected = ThemeId::ALL
+        .iter()
+        .position(|t| *t == app.theme_id)
+        .unwrap_or(0);
+    menu
 }
 
 fn module_root_menu(app: &App, module_idx: usize) -> MenuState {
@@ -163,11 +158,7 @@ fn module_root_menu(app: &App, module_idx: usize) -> MenuState {
     }
     append_rack_actions(&mut items);
 
-    MenuState {
-        title: m.title.clone(),
-        selected: 0,
-        items,
-    }
+    MenuState::new(m.title.clone(), items)
 }
 
 pub fn params_menu(app: &App, module_idx: usize) -> MenuState {
@@ -179,9 +170,9 @@ pub fn params_menu(app: &App, module_idx: usize) -> MenuState {
     let mut items = Vec::new();
     for ci in app.param_indices_for_module(module_idx) {
         if let Some(c) = app.controls.get(ci) {
-            let v = app.values.get(ci).copied().unwrap_or(0.0);
+            let shown = app.format_param(ci);
             items.push(MenuEntry::action(
-                format!("{}  {v:.3}", c.name),
+                format!("{}  {shown}", c.name),
                 MenuAction::EditParam { control_index: ci },
             ));
         }
@@ -189,11 +180,7 @@ pub fn params_menu(app: &App, module_idx: usize) -> MenuState {
     if items.is_empty() {
         items.push(MenuEntry::value("(no parameters)"));
     }
-    MenuState {
-        title,
-        selected: 0,
-        items,
-    }
+    MenuState::new(title, items)
 }
 
 pub fn outputs_menu(app: &App, module_idx: usize) -> MenuState {
@@ -224,11 +211,7 @@ pub fn outputs_menu(app: &App, module_idx: usize) -> MenuState {
     if items.is_empty() {
         items.push(MenuEntry::value("(no outputs)"));
     }
-    MenuState {
-        title: format!("{} · out", m.title),
-        selected: 0,
-        items,
-    }
+    MenuState::new(format!("{} · out", m.title), items)
 }
 
 pub fn inputs_menu(app: &App, module_idx: usize) -> MenuState {
@@ -264,11 +247,7 @@ pub fn inputs_menu(app: &App, module_idx: usize) -> MenuState {
     } else {
         format!("{} · in", m.title)
     };
-    MenuState {
-        title,
-        selected: 0,
-        items,
-    }
+    MenuState::new(title, items)
 }
 
 pub fn disconnect_menu(app: &App, module_idx: usize) -> MenuState {
@@ -276,11 +255,10 @@ pub fn disconnect_menu(app: &App, module_idx: usize) -> MenuState {
     let voice = match &m.id {
         ModuleId::Voice(id) => *id,
         _ => {
-            return MenuState {
-                title: "disconnect".into(),
-                selected: 0,
-                items: vec![MenuEntry::value("(not a voice)")],
-            };
+            return MenuState::new(
+                "disconnect",
+                vec![MenuEntry::value("(not a voice)")],
+            );
         }
     };
     let mut items = Vec::new();
@@ -306,11 +284,7 @@ pub fn disconnect_menu(app: &App, module_idx: usize) -> MenuState {
     if items.is_empty() {
         items.push(MenuEntry::value("(no cables)"));
     }
-    MenuState {
-        title: format!("{} · unplug", m.title),
-        selected: 0,
-        items,
-    }
+    MenuState::new(format!("{} · unplug", m.title), items)
 }
 
 pub fn add_kinds_menu(app: &App) -> MenuState {
@@ -327,11 +301,7 @@ pub fn add_kinds_menu(app: &App) -> MenuState {
     if items.is_empty() {
         items.push(MenuEntry::value("(no types)"));
     }
-    MenuState {
-        title: "add module".into(),
-        selected: 0,
-        items,
-    }
+    MenuState::new("add module", items)
 }
 
 pub fn devices_menu(app: &App, endpoint_id: &str) -> MenuState {
@@ -361,11 +331,7 @@ pub fn devices_menu(app: &App, endpoint_id: &str) -> MenuState {
             ));
         }
     }
-    MenuState {
-        title: format!("device · {endpoint_id}"),
-        selected: 0,
-        items,
-    }
+    MenuState::new(format!("device · {endpoint_id}"), items)
 }
 
 pub fn notes_menu(app: &App, module_idx: usize) -> MenuState {
@@ -385,21 +351,13 @@ pub fn notes_menu(app: &App, module_idx: usize) -> MenuState {
     if items.is_empty() {
         items.push(MenuEntry::value("(no notes)"));
     }
-    MenuState {
-        title: "notes".into(),
-        selected: 0,
-        items,
-    }
+    MenuState::new("notes", items)
 }
 
 pub fn info_menu(app: &App, module_idx: usize) -> MenuState {
     let mut items = Vec::new();
     let Some(m) = app.modules.get(module_idx) else {
-        return MenuState {
-            title: "info".into(),
-            selected: 0,
-            items: vec![MenuEntry::value("—")],
-        };
+        return MenuState::new("info", vec![MenuEntry::value("—")]);
     };
     items.push(MenuEntry::value(format!("title  {}", m.title)));
     items.push(MenuEntry::value(format!("kind   {}", m.kind)));
@@ -436,9 +394,5 @@ pub fn info_menu(app: &App, module_idx: usize) -> MenuState {
             )));
         }
     }
-    MenuState {
-        title: format!("{} · info", m.title),
-        selected: 0,
-        items,
-    }
+    MenuState::new(format!("{} · info", m.title), items)
 }

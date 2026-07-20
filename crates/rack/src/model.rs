@@ -105,8 +105,95 @@ pub struct BuildInput<'a> {
 #[derive(Clone, Debug)]
 pub struct MenuState {
     pub title: String,
+    /// Full unfiltered item list.
     pub items: Vec<MenuEntry>,
+    /// Index into the **filtered** view (see [`MenuState::filtered_indices`]).
     pub selected: usize,
+    /// Incremental type-to-filter query (case-insensitive substring on labels).
+    pub filter: String,
+}
+
+impl MenuState {
+    pub fn new(title: impl Into<String>, items: Vec<MenuEntry>) -> Self {
+        Self {
+            title: title.into(),
+            items,
+            selected: 0,
+            filter: String::new(),
+        }
+    }
+
+    /// Indices into `items` that match the current filter (all items if empty).
+    pub fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.items.len()).collect();
+        }
+        let q = self.filter.to_ascii_lowercase();
+        self.items
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.label.to_ascii_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    pub fn filtered_len(&self) -> usize {
+        if self.filter.is_empty() {
+            self.items.len()
+        } else {
+            self.filtered_indices().len()
+        }
+    }
+
+    /// Source index of the currently selected filtered row.
+    pub fn selected_source_index(&self) -> Option<usize> {
+        let filtered = self.filtered_indices();
+        if filtered.is_empty() {
+            return None;
+        }
+        let sel = self.selected.min(filtered.len() - 1);
+        Some(filtered[sel])
+    }
+
+    pub fn selected_entry(&self) -> Option<&MenuEntry> {
+        self.selected_source_index()
+            .and_then(|i| self.items.get(i))
+    }
+
+    /// Clamp selection into the filtered range (call after filter changes).
+    pub fn clamp_selection(&mut self) {
+        let n = self.filtered_len();
+        if n == 0 {
+            self.selected = 0;
+        } else {
+            self.selected = self.selected.min(n - 1);
+        }
+    }
+
+    pub fn push_filter_char(&mut self, ch: char) {
+        self.filter.push(ch);
+        self.selected = 0;
+        self.clamp_selection();
+    }
+
+    pub fn pop_filter_char(&mut self) -> bool {
+        if self.filter.is_empty() {
+            return false;
+        }
+        self.filter.pop();
+        self.selected = 0;
+        self.clamp_selection();
+        true
+    }
+
+    pub fn clear_filter(&mut self) -> bool {
+        if self.filter.is_empty() {
+            return false;
+        }
+        self.filter.clear();
+        self.selected = 0;
+        true
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -518,7 +518,7 @@ impl ServerHandler for SynthMcp {
              Use list_module_types / get_patch / list_controls to inspect, \
              then set_param, add_module, patch_connect, note_on, \
              set_coordinates, etc. to edit. \
-             Module layout uses coordinates {x,y} and optional canvas; ignored by DSP. \
+             Module layout uses required coordinates {x,y} and optional canvas; ignored by DSP. \
              Engine must already be running.",
         )
     }

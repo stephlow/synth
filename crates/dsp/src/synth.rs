@@ -11,8 +11,7 @@ const NUM_VOICES: usize = 4;
 /// must match the capture-channel count each voice's `Io` is built with
 /// in `patch.rs`.
 const NUM_EXTERNAL_INPUT_CHANNELS: usize = 2;
-/// Master output channels: 0 = mixed audio, 1 = pitch CV, 2 = gate CV,
-/// 3 = spare/aux (silent, available for future patching).
+/// Master output channels: 0 = audio L, 1 = audio R, 2 = pitch CV, 3 = gate CV.
 const NUM_MASTER_OUTPUT_CHANNELS: usize = 4;
 
 /// Sentinel module index for the master (non-voice-graph) `Io`. Control
@@ -57,6 +56,7 @@ pub struct Synth {
     /// `mixed` — never (re)allocated on the audio thread.
     voice_scratch: [f32; MAX_BLOCK_FRAMES],
     /// The voices' summed (averaged) mono audio for the current block.
+    /// Dualled to hardware L+R in `process_block`.
     mixed: [f32; MAX_BLOCK_FRAMES],
 
     /// Mono CV/gate-out source, independent of the 4-voice polyphony
@@ -91,9 +91,12 @@ pub struct Synth {
 impl Synth {
     /// `output_channel` indices for the master hardware output — see
     /// `NUM_MASTER_OUTPUT_CHANNELS`.
-    pub const CHANNEL_AUDIO: usize = 0;
-    pub const CHANNEL_PITCH_CV: usize = 1;
-    pub const CHANNEL_GATE_CV: usize = 2;
+    pub const CHANNEL_AUDIO_L: usize = 0;
+    pub const CHANNEL_AUDIO_R: usize = 1;
+    /// Alias for left audio (scope / legacy mono peak).
+    pub const CHANNEL_AUDIO: usize = Self::CHANNEL_AUDIO_L;
+    pub const CHANNEL_PITCH_CV: usize = 2;
+    pub const CHANNEL_GATE_CV: usize = 3;
     /// Total number of `output_channel` indices the synth defines;
     /// callers should treat any physical channel beyond this as silent.
     pub const NUM_OUTPUT_CHANNELS: usize = NUM_MASTER_OUTPUT_CHANNELS;
@@ -309,10 +312,10 @@ impl Synth {
     }
 
     /// Sets calibration (`out = in * scale + offset`) for master output
-    /// `channel` (see `CHANNEL_AUDIO`/`CHANNEL_PITCH_CV`/`CHANNEL_GATE_CV`)
-    /// — e.g. scale the pitch-CV channel down to match a real interface's
-    /// full-scale voltage so this engine's 1V/oct convention actually
-    /// lands at 1V/oct on the jack. See `Io`'s doc comment for worked
+    /// `channel` (see `CHANNEL_AUDIO_L` / `CHANNEL_AUDIO_R` / `CHANNEL_PITCH_CV` /
+    /// `CHANNEL_GATE_CV`) — e.g. scale the pitch-CV channel down to match a
+    /// real interface's full-scale voltage so this engine's 1V/oct convention
+    /// actually lands at 1V/oct on the jack. See `Io`'s doc comment for worked
     /// examples; there's no built-in default beyond neutral (1.0/0.0)
     /// since the right numbers depend entirely on the hardware in use.
     pub fn set_output_calibration(&mut self, channel: usize, scale: f32, offset: f32) {
@@ -420,7 +423,7 @@ impl Synth {
             }
         }
 
-        // Render and mix voices.
+        // Render and mix voices (mono graph → mono sum).
         self.mixed[..frames].fill(0.0);
         for voice in &mut self.voices {
             let scratch = &mut self.voice_scratch[..frames];
@@ -445,14 +448,13 @@ impl Synth {
         let pitch_cv_start = MidiToCv::OUT_PITCH * frames;
         let gate_cv_start = MidiToCv::OUT_GATE * frames;
 
-        // Assemble the master Io's send channels and run it.
+        // Master Io: dual mono audio on L+R, then pitch CV, gate CV.
         self.master_out_inputs[..frames].copy_from_slice(&self.mixed[..frames]);
-        let (pitch_dst, rest) =
-            self.master_out_inputs[frames..].split_at_mut(frames);
-        pitch_dst.copy_from_slice(&self.master_cv_scratch[pitch_cv_start..pitch_cv_start + frames]);
-        let (gate_dst, aux_dst) = rest.split_at_mut(frames);
-        gate_dst.copy_from_slice(&self.master_cv_scratch[gate_cv_start..gate_cv_start + frames]);
-        aux_dst[..frames].fill(0.0);
+        self.master_out_inputs[frames..2 * frames].copy_from_slice(&self.mixed[..frames]);
+        self.master_out_inputs[2 * frames..3 * frames]
+            .copy_from_slice(&self.master_cv_scratch[pitch_cv_start..pitch_cv_start + frames]);
+        self.master_out_inputs[3 * frames..4 * frames]
+            .copy_from_slice(&self.master_cv_scratch[gate_cv_start..gate_cv_start + frames]);
 
         self.master_io.process(
             &self.master_out_inputs[..NUM_MASTER_OUTPUT_CHANNELS * frames],
@@ -549,16 +551,14 @@ impl Synth {
     }
 
     /// Reads back hardware output `channel`'s block from the most recent
-    /// `process_block` call. Channel 0 is the mixed synth audio, 1 is
-    /// pitch CV, 2 is gate CV, 3 is silent/spare (see `NUM_MASTER_OUTPUT_CHANNELS`).
+    /// `process_block` call. Channels: 0 = audio L, 1 = audio R (copy of L),
+    /// 2 = pitch CV, 3 = gate CV (see `NUM_MASTER_OUTPUT_CHANNELS`).
     pub fn output_channel(&self, channel: usize) -> &[f32] {
         let start = channel * self.last_frames;
         &self.master_out_outputs[start..start + self.last_frames]
     }
 
-    /// Most recent block of the mixed (summed, normalized) audio output —
-    /// what actually reaches the speakers — for a live oscilloscope view
-    /// (see `EngineMeters::publish_waveform` and the `rack` TUI).
+    /// Most recent block of mixed mono audio (dualled to L+R on the master).
     pub fn scope_waveform(&self) -> &[f32] {
         &self.mixed[..self.last_frames]
     }
@@ -624,12 +624,21 @@ mod tests {
     // just the voice-allocation bookkeeping the tests above check.
 
     #[test]
-    fn silent_with_no_notes_held() {
+    fn free_running_groove_without_notes() {
+        // Default patch free-runs bass/kick/snare; MIDI lead stays silent
+        // until a note is held.
         let mut synth = Synth::new(48_000.0);
-        synth.process_block(256);
+        let mut energy = 0.0f64;
+        for _ in 0..40 {
+            synth.process_block(256);
+            for &s in synth.output_channel(0) {
+                assert!(s.is_finite());
+                energy += f64::from(s * s);
+            }
+        }
         assert!(
-            synth.output_channel(0).iter().all(|&s| s == 0.0),
-            "expected silence with no notes held"
+            energy > 0.0,
+            "expected free-running bass/drums without MIDI notes"
         );
     }
 
@@ -652,22 +661,28 @@ mod tests {
     }
 
     #[test]
-    fn returns_to_silence_after_the_release_tail_finishes() {
+    fn lead_release_does_not_stop_the_groove() {
+        // After the MIDI lead releases, free-running bass/drums keep going.
         let mut synth = Synth::new(48_000.0);
         synth.note_on(note(69), velocity(100));
 
         for _ in 0..10 {
-            synth.process_block(256); // past attack/decay, into sustain
+            synth.process_block(256);
         }
         synth.note_off(note(69), velocity(0));
 
-        // Longest release in the default patch is the filter envelope's
-        // 0.4s; render well past that.
         for _ in 0..100 {
             synth.process_block(256);
         }
-        let max = synth.output_channel(0).iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-        assert!(max < 1e-3, "expected near-silence after the release tail, got max {max}");
+        let mut energy = 0.0f64;
+        for &s in synth.output_channel(0) {
+            assert!(s.is_finite());
+            energy += f64::from(s * s);
+        }
+        assert!(
+            energy > 0.0,
+            "expected accompaniment to keep playing after lead release"
+        );
     }
 
     #[test]
@@ -676,8 +691,8 @@ mod tests {
         synth.note_on(note(69), velocity(100)); // A4, pitch CV = 0.0 (440Hz reference)
         synth.process_block(64);
 
-        let pitch_while_held = synth.output_channel(1)[0];
-        let gate_while_held = synth.output_channel(2)[0];
+        let pitch_while_held = synth.output_channel(Synth::CHANNEL_PITCH_CV)[0];
+        let gate_while_held = synth.output_channel(Synth::CHANNEL_GATE_CV)[0];
         assert_eq!(pitch_while_held, 0.0);
         assert_eq!(gate_while_held, 1.0);
 
@@ -685,16 +700,27 @@ mod tests {
         synth.process_block(64);
 
         // Pitch holds its last value (nothing resets it); gate drops.
-        assert_eq!(synth.output_channel(1)[0], pitch_while_held);
-        assert_eq!(synth.output_channel(2)[0], 0.0);
+        assert_eq!(
+            synth.output_channel(Synth::CHANNEL_PITCH_CV)[0],
+            pitch_while_held
+        );
+        assert_eq!(synth.output_channel(Synth::CHANNEL_GATE_CV)[0], 0.0);
     }
 
     #[test]
-    fn aux_output_channel_is_silent() {
+    fn mono_mix_is_dualled_to_left_and_right() {
         let mut synth = Synth::new(48_000.0);
-        synth.note_on(note(69), velocity(100));
-        synth.process_block(64);
-        assert!(synth.output_channel(3).iter().all(|&s| s == 0.0));
+        for _ in 0..20 {
+            synth.process_block(256);
+        }
+        let l = synth.output_channel(Synth::CHANNEL_AUDIO_L);
+        let r = synth.output_channel(Synth::CHANNEL_AUDIO_R);
+        assert_eq!(l.len(), r.len());
+        assert!(
+            l.iter().zip(r.iter()).all(|(a, b)| (a - b).abs() < 1e-6),
+            "L and R should be identical dual-mono copies"
+        );
+        assert!(l.iter().any(|s| s.abs() > 1e-6), "expected non-silent dual mono");
     }
 
     #[test]
@@ -757,7 +783,11 @@ mod tests {
     fn master_io_module_set_param_reaches_calibration() {
         let mut synth = Synth::new(48_000.0);
         synth.note_on(Note::try_from(81).unwrap(), velocity(100));
-        synth.set_param(MASTER_IO_MODULE, Io::param_send_scale(1), 0.1);
+        synth.set_param(
+            MASTER_IO_MODULE,
+            Io::param_send_scale(Synth::CHANNEL_PITCH_CV),
+            0.1,
+        );
         synth.process_block(1);
         let calibrated = synth.output_channel(Synth::CHANNEL_PITCH_CV)[0];
         assert!(

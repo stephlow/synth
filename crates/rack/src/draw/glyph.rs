@@ -20,12 +20,21 @@ pub enum GlyphKind {
     Mixer,
     Noise,
     SampleHold,
+    Sequencer,
+    Quantizer,
     Attenuverter,
     MidiCv,
     Scope,
     Meter,
     Keyboard,
     Io,
+    Slew,
+    ClockDiv,
+    Delay,
+    Wavefolder,
+    Lpg,
+    Function,
+    RingMod,
     Generic,
 }
 
@@ -40,12 +49,21 @@ impl GlyphKind {
             "mixer" | "mix" => GlyphKind::Mixer,
             "noise" => GlyphKind::Noise,
             "sample_hold" | "sample-hold" | "s&h" => GlyphKind::SampleHold,
+            "sequencer" | "seq" => GlyphKind::Sequencer,
+            "quantizer" | "quant" => GlyphKind::Quantizer,
             "attenuverter" | "atv" => GlyphKind::Attenuverter,
             "midi_to_cv" | "m2cv" | "miditocv" => GlyphKind::MidiCv,
             "oscilloscope" | "scope" => GlyphKind::Scope,
             "meter" => GlyphKind::Meter,
             "keyboard" | "keys" => GlyphKind::Keyboard,
             "io" => GlyphKind::Io,
+            "slew" | "lag" | "portamento" => GlyphKind::Slew,
+            "clock_div" | "clock-div" | "divider" => GlyphKind::ClockDiv,
+            "delay" => GlyphKind::Delay,
+            "wavefolder" | "folder" | "fold" => GlyphKind::Wavefolder,
+            "lpg" | "lowpass_gate" | "low-pass-gate" => GlyphKind::Lpg,
+            "function" | "slope" | "ad" => GlyphKind::Function,
+            "ring_mod" | "ringmod" | "ring" => GlyphKind::RingMod,
             _ => GlyphKind::Generic,
         }
     }
@@ -57,6 +75,8 @@ pub struct GlyphPaint<'a> {
     pub style: Style,
     /// Live samples for Scope (and optional fallback wave for Generic).
     pub samples: Option<&'a [f32]>,
+    /// Quantizer: 12-bit pitch-class mask for scale glyph (None = Major).
+    pub scale_mask: Option<u16>,
 }
 
 /// Paint audio glyph into the **inner** rect (already inside borders).
@@ -71,8 +91,8 @@ pub fn paint_glyph(buf: &mut Buffer, inner: Rect, paint: &GlyphPaint<'_>) {
     if let Some(s) = paint.samples {
         if s.iter().any(|v| v.abs() > 1e-5) {
             match paint.kind {
-                // Oscilloscope / continuous waveforms: true scope trace.
-                GlyphKind::Keyboard | GlyphKind::Io => {}
+                // Keep structural glyphs (not live scope traces).
+                GlyphKind::Keyboard | GlyphKind::Io | GlyphKind::Quantizer => {}
                 GlyphKind::Meter => {
                     meter_bars(buf, inner, i, paint.style);
                     return;
@@ -97,12 +117,23 @@ pub fn paint_glyph(buf: &mut Buffer, inner: Rect, paint: &GlyphPaint<'_>) {
         GlyphKind::Mixer => mixer(buf, inner, i, paint.style),
         GlyphKind::Noise => noise(buf, inner, i, paint.style),
         GlyphKind::SampleHold => sample_hold(buf, inner, i, paint.style),
+        GlyphKind::Sequencer => sequencer(buf, inner, i, paint.style),
+        GlyphKind::Quantizer => {
+            quantizer(buf, inner, i, paint.style, paint.scale_mask.unwrap_or(0x0AB5))
+        }
         GlyphKind::Attenuverter => attenuverter(buf, inner, i, paint.style),
         GlyphKind::MidiCv => midi_cv(buf, inner, i, paint.style),
         GlyphKind::Scope => wave(buf, inner, i, paint.style, WaveShape::Sine, 3.0),
         GlyphKind::Meter => meter_bars(buf, inner, i, paint.style),
         GlyphKind::Keyboard => keyboard(buf, inner, i, paint.style),
         GlyphKind::Io => io_jacks(buf, inner, i, paint.style),
+        GlyphKind::Slew => slew_glyph(buf, inner, i, paint.style),
+        GlyphKind::ClockDiv => clock_div_glyph(buf, inner, i, paint.style),
+        GlyphKind::Delay => delay_glyph(buf, inner, i, paint.style),
+        GlyphKind::Wavefolder => wavefolder_glyph(buf, inner, i, paint.style),
+        GlyphKind::Lpg => lpg_glyph(buf, inner, i, paint.style),
+        GlyphKind::Function => function_glyph(buf, inner, i, paint.style),
+        GlyphKind::RingMod => ring_mod_glyph(buf, inner, i, paint.style),
         GlyphKind::Generic => wave(buf, inner, i, paint.style, WaveShape::Sine, 1.5),
     }
 }
@@ -355,6 +386,176 @@ fn sample_hold(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
                 set(buf, area.x + x, area.y + y, '│', style);
             }
         }
+    }
+}
+
+fn sequencer(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Vertical step bars like a classic step-sequencer panel.
+    let n = (4 + (intensity * 4.0) as u16).min(8).min(area.width.max(1));
+    let gap = 1u16;
+    let usable = area.width.saturating_sub(gap.saturating_mul(n.saturating_sub(1)));
+    let bar_w = (usable / n).max(1);
+    let h = area.height.max(1) as f32;
+    let active = ((intensity * n as f32) as u16).min(n.saturating_sub(1));
+    for s in 0..n {
+        let level = 0.25 + 0.7 * (((s as f32 * 0.37 + intensity).sin() * 0.5) + 0.5);
+        let bar_h = ((level * h).round() as u16).clamp(1, area.height);
+        let x0 = s * (bar_w + gap);
+        if x0 >= area.width {
+            break;
+        }
+        let x1 = (x0 + bar_w).min(area.width);
+        let y0 = area.height.saturating_sub(bar_h);
+        let ch = if s == active { '█' } else { '▄' };
+        for x in x0..x1 {
+            for y in y0..area.height {
+                set(buf, area.x + x, area.y + y, ch, style);
+            }
+        }
+    }
+}
+
+fn quantizer(buf: &mut Buffer, area: Rect, intensity: f32, style: Style, mask: u16) {
+    // 12 pitch-class slots: filled = in scale, dim dots = out. Reads like a
+    // miniature keyboard / degree strip for the selected quantizer scale.
+    let mask = if mask & 0x0FFF == 0 { 0x0FFF } else { mask & 0x0FFF };
+    let n = 12u16;
+    let slot_w = (area.width / n).max(1);
+    let h = area.height.max(1);
+
+    // Baseline.
+    let base_y = area.y + h.saturating_sub(1);
+    for x in 0..area.width {
+        set(buf, area.x + x, base_y, '─', style);
+    }
+
+    for pc in 0..12u16 {
+        let on = mask & (1 << pc) != 0;
+        let x0 = pc * slot_w;
+        if x0 >= area.width {
+            break;
+        }
+        let x1 = ((pc + 1) * slot_w).min(area.width);
+        // Black-key-ish positions sit slightly higher when out of scale.
+        let is_black = matches!(pc, 1 | 3 | 6 | 8 | 10);
+        let bar_h = if on {
+            if is_black {
+                (h * 2 / 3).max(1)
+            } else {
+                h.saturating_sub(1).max(1)
+            }
+        } else {
+            1
+        };
+        let y0 = area.y + h.saturating_sub(bar_h);
+        let ch = if on {
+            if intensity > 0.55 {
+                '█'
+            } else {
+                '▄'
+            }
+        } else {
+            '·'
+        };
+        for x in x0..x1 {
+            for y in y0..area.y + h {
+                if y == base_y && !on {
+                    continue;
+                }
+                set(buf, area.x + x, y, ch, style);
+            }
+        }
+    }
+}
+
+fn slew_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Smooth ramp from low-left to high-right (portamento).
+    let h = area.height.max(1) as f32;
+    for x in 0..area.width {
+        let t = x as f32 / area.width.max(1) as f32;
+        let yn = t * (0.2 + 0.8 * intensity);
+        let row = ((1.0 - yn) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        set(buf, area.x + x, area.y + row, '─', style);
+    }
+}
+
+fn clock_div_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Nested pulse trains (/2 /4).
+    let h = area.height.max(1);
+    let mid = h / 2;
+    for x in 0..area.width {
+        let on2 = (x / 2) % 2 == 0;
+        let on4 = (x / 4) % 2 == 0;
+        if on2 {
+            set(buf, area.x + x, area.y + mid.saturating_sub(1), '▀', style);
+        }
+        if on4 && intensity > 0.3 {
+            set(buf, area.x + x, area.y + mid.min(h - 1), '▄', style);
+        }
+    }
+}
+
+fn delay_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Echo dots receding to the right.
+    let taps = (2 + (intensity * 3.0) as u16).min(5);
+    let h = area.height.max(1) as f32;
+    for t in 0..taps {
+        let x = ((t as f32 + 0.5) / taps as f32 * area.width as f32) as u16;
+        let yn = 0.3 + 0.5 * (1.0 - t as f32 / taps as f32) * intensity;
+        let row = ((1.0 - yn) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        let ch = if t == 0 { '●' } else { '·' };
+        if x < area.width {
+            set(buf, area.x + x, area.y + row, ch, style);
+        }
+    }
+}
+
+fn wavefolder_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Zigzag fold of a rising line.
+    let h = area.height.max(1) as f32;
+    let folds = 2 + (intensity * 2.0) as i32;
+    for x in 0..area.width {
+        let t = x as f32 / area.width.max(1) as f32;
+        let zig = (t * folds as f32).fract();
+        let tri = if zig < 0.5 { zig * 2.0 } else { 2.0 - zig * 2.0 };
+        let row = ((1.0 - tri * 0.85) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        set(buf, area.x + x, area.y + row, '╱', style);
+    }
+}
+
+fn lpg_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Filter curve that opens with intensity (vactrol-ish).
+    filter_curve(buf, area, intensity, style);
+}
+
+fn function_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // AD spike: rise then fall.
+    let h = area.height.max(1) as f32;
+    let peak_x = (area.width as f32 * (0.2 + 0.2 * intensity)) as u16;
+    for x in 0..area.width {
+        let yn = if x <= peak_x {
+            x as f32 / peak_x.max(1) as f32
+        } else {
+            1.0 - (x - peak_x) as f32 / (area.width - peak_x).max(1) as f32
+        };
+        let yn = yn.clamp(0.0, 1.0) * (0.4 + 0.6 * intensity);
+        let row = ((1.0 - yn) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        set(buf, area.x + x, area.y + row, '─', style);
+    }
+}
+
+fn ring_mod_glyph(buf: &mut Buffer, area: Rect, intensity: f32, style: Style) {
+    // Two crossing waves (×).
+    let h = area.height.max(1) as f32;
+    let w = area.width.max(1) as f32;
+    for x in 0..area.width {
+        let t = x as f32 / w;
+        let a = ((t * 4.0 * std::f32::consts::PI).sin() * 0.5 + 0.5) * intensity;
+        let b = ((t * 6.0 * std::f32::consts::PI).sin() * 0.5 + 0.5) * intensity;
+        let ra = ((1.0 - a) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        let rb = ((1.0 - b) * (h - 1.0)).round().clamp(0.0, h - 1.0) as u16;
+        set(buf, area.x + x, area.y + ra, '·', style);
+        set(buf, area.x + x, area.y + rb, '·', style);
     }
 }
 

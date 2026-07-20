@@ -38,6 +38,8 @@ pub struct TilePaint {
     pub use_scope: bool,
     /// Owned live waveform for this tile (per-module); scope uses shared buffer.
     pub live_wave: Option<Vec<f32>>,
+    /// Quantizer scale pitch-class mask for glyph.
+    pub scale_mask: Option<u16>,
 }
 
 pub fn draw_lattice(frame: &mut Frame, area: Rect, paint: &LatticePaint<'_>) {
@@ -123,6 +125,7 @@ pub fn draw_lattice(frame: &mut Frame, area: Rect, paint: &LatticePaint<'_>) {
                     soft: t.soft,
                     armed: t.armed && !paint.dimmed,
                     samples,
+                    scale_mask: t.scale_mask,
                 },
             );
         }

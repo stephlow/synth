@@ -55,6 +55,7 @@ pub fn tile_paints(app: &App) -> Vec<TilePaint> {
             armed,
             use_scope: use_live,
             live_wave,
+            scale_mask: app.quantizer_scale_mask(i),
         });
     }
     out

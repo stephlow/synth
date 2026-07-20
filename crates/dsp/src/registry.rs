@@ -5,9 +5,10 @@
 
 use crate::module::Module;
 use crate::modules::{
-    Attenuverter, Envelope, Io, Lfo, MidiToCv, Mixer, Noise, Oscilloscope, SampleHold, Vca, Vcf,
-    Vco,
+    Attenuverter, ClockDiv, Delay, Envelope, Function, Io, Lfo, Lpg, MidiToCv, Mixer, Noise,
+    Oscilloscope, Quantizer, RingMod, SampleHold, Sequencer, Slew, Vca, Vcf, Vco, Wavefolder,
 };
+use crate::modules::scale::{SCALE_INDEX_MAX, SCALE_MAJOR, SCALE_NAMES};
 use crate::patch::ModuleInstance;
 
 /// One named input or output port on a module type.
@@ -25,6 +26,8 @@ pub struct ParamMeta {
     pub min: f32,
     pub max: f32,
     pub default: f32,
+    /// Discrete value labels (index = rounded param). Empty = continuous.
+    pub choices: &'static [&'static str],
 }
 
 /// Static description of a module kind available in the registry.
@@ -111,8 +114,120 @@ fn create_sample_hold(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
     Box::new(SampleHold::new())
 }
 
+fn create_quantizer(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let scale = i.param_value(Quantizer::PARAM_SCALE, SCALE_MAJOR as f32);
+    let root = i.param_value(Quantizer::PARAM_ROOT, 0.0);
+    Box::new(Quantizer::with_params(scale, root))
+}
+
+fn create_sequencer(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut seq = Sequencer::new(sr);
+    let steps = i.param_value(Sequencer::PARAM_STEPS, 8.0);
+    let gate_len = i.param_value(Sequencer::PARAM_GATE_LEN, 0.5);
+    seq.set_param(Sequencer::PARAM_STEPS, steps);
+    seq.set_param(Sequencer::PARAM_GATE_LEN, gate_len);
+    for n in 0..Sequencer::MAX_STEPS {
+        let p = Sequencer::param_step(n);
+        // Defaults match Sequencer::new motif for the first 8, else 0.
+        let default = match n {
+            0 => 0.0 / 12.0,
+            1 => 2.0 / 12.0,
+            2 => 4.0 / 12.0,
+            3 => 5.0 / 12.0,
+            4 => 7.0 / 12.0,
+            5 => 9.0 / 12.0,
+            6 => 11.0 / 12.0,
+            7 => 12.0 / 12.0,
+            _ => 0.0,
+        };
+        let v = i.param_value(p, default);
+        seq.set_param(p, v);
+    }
+    Box::new(seq)
+}
+
 fn create_oscilloscope(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
     Box::new(Oscilloscope::new())
+}
+
+fn create_slew(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Slew::new(sr);
+    m.set_param(
+        Slew::PARAM_RISE,
+        i.param_value(Slew::PARAM_RISE, 0.05),
+    );
+    m.set_param(
+        Slew::PARAM_FALL,
+        i.param_value(Slew::PARAM_FALL, 0.05),
+    );
+    Box::new(m)
+}
+
+fn create_clock_div(sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
+    Box::new(ClockDiv::new(sr))
+}
+
+fn create_delay(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Delay::new(sr);
+    m.set_param(Delay::PARAM_TIME, i.param_value(Delay::PARAM_TIME, 250.0));
+    m.set_param(
+        Delay::PARAM_FEEDBACK,
+        i.param_value(Delay::PARAM_FEEDBACK, 0.35),
+    );
+    m.set_param(Delay::PARAM_MIX, i.param_value(Delay::PARAM_MIX, 0.3));
+    Box::new(m)
+}
+
+fn create_wavefolder(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Wavefolder::new();
+    m.set_param(
+        Wavefolder::PARAM_DRIVE,
+        i.param_value(Wavefolder::PARAM_DRIVE, 1.5),
+    );
+    m.set_param(
+        Wavefolder::PARAM_SYMMETRY,
+        i.param_value(Wavefolder::PARAM_SYMMETRY, 0.0),
+    );
+    m.set_param(
+        Wavefolder::PARAM_MIX,
+        i.param_value(Wavefolder::PARAM_MIX, 1.0),
+    );
+    Box::new(m)
+}
+
+fn create_lpg(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Lpg::new(sr);
+    m.set_param(
+        Lpg::PARAM_OFFSET,
+        i.param_value(Lpg::PARAM_OFFSET, 0.0),
+    );
+    Box::new(m)
+}
+
+fn create_function(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Function::new(sr);
+    m.set_param(
+        Function::PARAM_ATTACK,
+        i.param_value(Function::PARAM_ATTACK, 0.01),
+    );
+    m.set_param(
+        Function::PARAM_DECAY,
+        i.param_value(Function::PARAM_DECAY, 0.2),
+    );
+    m.set_param(
+        Function::PARAM_CYCLE,
+        i.param_value(Function::PARAM_CYCLE, 0.0),
+    );
+    Box::new(m)
+}
+
+fn create_ring_mod(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = RingMod::new();
+    m.set_param(
+        RingMod::PARAM_LEVEL,
+        i.param_value(RingMod::PARAM_LEVEL, 1.0),
+    );
+    Box::new(m)
 }
 
 fn create_io(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
@@ -122,6 +237,154 @@ fn create_io(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
 }
 
 // --- static tables -----------------------------------------------------------
+
+/// Sequencer control metadata (Steps, Gate Len, Step 1..16).
+static SEQUENCER_PARAMS: &[ParamMeta] = &[
+    ParamMeta {
+        name: "Steps",
+        index: Sequencer::PARAM_STEPS,
+        min: 1.0,
+        max: 16.0,
+        default: 8.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Gate Len",
+        index: Sequencer::PARAM_GATE_LEN,
+        min: 0.0,
+        max: 1.0,
+        default: 0.5,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 1",
+        index: Sequencer::PARAM_STEP0,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 2",
+        index: Sequencer::PARAM_STEP0 + 1,
+        min: -2.0,
+        max: 2.0,
+        default: 2.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 3",
+        index: Sequencer::PARAM_STEP0 + 2,
+        min: -2.0,
+        max: 2.0,
+        default: 4.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 4",
+        index: Sequencer::PARAM_STEP0 + 3,
+        min: -2.0,
+        max: 2.0,
+        default: 5.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 5",
+        index: Sequencer::PARAM_STEP0 + 4,
+        min: -2.0,
+        max: 2.0,
+        default: 7.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 6",
+        index: Sequencer::PARAM_STEP0 + 5,
+        min: -2.0,
+        max: 2.0,
+        default: 9.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 7",
+        index: Sequencer::PARAM_STEP0 + 6,
+        min: -2.0,
+        max: 2.0,
+        default: 11.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 8",
+        index: Sequencer::PARAM_STEP0 + 7,
+        min: -2.0,
+        max: 2.0,
+        default: 12.0 / 12.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 9",
+        index: Sequencer::PARAM_STEP0 + 8,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 10",
+        index: Sequencer::PARAM_STEP0 + 9,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 11",
+        index: Sequencer::PARAM_STEP0 + 10,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 12",
+        index: Sequencer::PARAM_STEP0 + 11,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 13",
+        index: Sequencer::PARAM_STEP0 + 12,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 14",
+        index: Sequencer::PARAM_STEP0 + 13,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 15",
+        index: Sequencer::PARAM_STEP0 + 14,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+    ParamMeta {
+        name: "Step 16",
+        index: Sequencer::PARAM_STEP0 + 15,
+        min: -2.0,
+        max: 2.0,
+        default: 0.0,
+        choices: &[],
+    },
+];
 
 static ENTRIES: &[Entry] = &[
     Entry {
@@ -185,7 +448,8 @@ static ENTRIES: &[Entry] = &[
                 min: -2.0,
                 max: 2.0,
                 default: 0.0,
-            }],
+        choices: &[],
+    }],
         },
         factory: create_vco,
     },
@@ -228,14 +492,16 @@ static ENTRIES: &[Entry] = &[
                     min: 20.0,
                     max: 10_000.0,
                     default: 1000.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Resonance",
                     index: Vcf::PARAM_RESONANCE,
                     min: 0.0,
                     max: 1.0,
                     default: 0.2,
-                },
+        choices: &[],
+    },
             ],
         },
         factory: create_vcf,
@@ -264,7 +530,8 @@ static ENTRIES: &[Entry] = &[
                 min: 0.0,
                 max: 1.5,
                 default: 1.0,
-            }],
+        choices: &[],
+    }],
         },
         factory: create_vca,
     },
@@ -287,28 +554,32 @@ static ENTRIES: &[Entry] = &[
                     min: 0.001,
                     max: 2.0,
                     default: 0.01,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Decay",
                     index: Envelope::PARAM_DECAY,
                     min: 0.001,
                     max: 2.0,
                     default: 0.1,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Sustain",
                     index: Envelope::PARAM_SUSTAIN,
                     min: 0.0,
                     max: 1.0,
                     default: 0.7,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Release",
                     index: Envelope::PARAM_RELEASE,
                     min: 0.01,
                     max: 5.0,
                     default: 0.3,
-                },
+        choices: &[],
+    },
             ],
         },
         factory: create_envelope,
@@ -337,7 +608,8 @@ static ENTRIES: &[Entry] = &[
                 min: 0.1,
                 max: 20.0,
                 default: 2.0,
-            }],
+        choices: &[],
+    }],
         },
         factory: create_lfo,
     },
@@ -361,14 +633,16 @@ static ENTRIES: &[Entry] = &[
                     min: -2.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Offset",
                     index: Attenuverter::PARAM_OFFSET,
                     min: -1.0,
                     max: 1.0,
                     default: 0.0,
-                },
+        choices: &[],
+    },
             ],
         },
         factory: create_attenuverter,
@@ -406,28 +680,32 @@ static ENTRIES: &[Entry] = &[
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Level 2",
                     index: Mixer::PARAM_LEVEL_2,
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Level 3",
                     index: Mixer::PARAM_LEVEL_3,
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Level 4",
                     index: Mixer::PARAM_LEVEL_4,
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
             ],
         },
         factory: create_mixer,
@@ -469,6 +747,350 @@ static ENTRIES: &[Entry] = &[
     },
     Entry {
         info: ModuleTypeInfo {
+            kind: "quantizer",
+            display_name: "Quantizer",
+            inputs: &[PortMeta {
+                name: "cv",
+                index: Quantizer::IN_CV,
+            }],
+            outputs: &[PortMeta {
+                name: "cv",
+                index: Quantizer::OUT_CV,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Scale",
+                    index: Quantizer::PARAM_SCALE,
+                    min: 0.0,
+                    max: SCALE_INDEX_MAX,
+                    default: SCALE_MAJOR as f32,
+                    choices: SCALE_NAMES,
+                },
+                ParamMeta {
+                    name: "Root",
+                    index: Quantizer::PARAM_ROOT,
+                    min: -12.0,
+                    max: 12.0,
+                    default: 0.0,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_quantizer,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "sequencer",
+            display_name: "Sequencer",
+            inputs: &[
+                PortMeta {
+                    name: "clock",
+                    index: Sequencer::IN_CLOCK,
+                },
+                PortMeta {
+                    name: "reset",
+                    index: Sequencer::IN_RESET,
+                },
+            ],
+            outputs: &[
+                PortMeta {
+                    name: "cv",
+                    index: Sequencer::OUT_CV,
+                },
+                PortMeta {
+                    name: "gate",
+                    index: Sequencer::OUT_GATE,
+                },
+                PortMeta {
+                    name: "trigger",
+                    index: Sequencer::OUT_TRIGGER,
+                },
+            ],
+            params: SEQUENCER_PARAMS,
+        },
+        factory: create_sequencer,
+    },
+    // --- East / West coast utilities ---
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "slew",
+            display_name: "Slew",
+            inputs: &[
+                PortMeta {
+                    name: "signal",
+                    index: Slew::IN_SIGNAL,
+                },
+                PortMeta {
+                    name: "rate_cv",
+                    index: Slew::IN_RATE_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "signal",
+                index: Slew::OUT_SIGNAL,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Rise",
+                    index: Slew::PARAM_RISE,
+                    min: 0.001,
+                    max: 2.0,
+                    default: 0.05,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Fall",
+                    index: Slew::PARAM_FALL,
+                    min: 0.001,
+                    max: 2.0,
+                    default: 0.05,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_slew,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "clock_div",
+            display_name: "Clock Div",
+            inputs: &[
+                PortMeta {
+                    name: "clock",
+                    index: ClockDiv::IN_CLOCK,
+                },
+                PortMeta {
+                    name: "reset",
+                    index: ClockDiv::IN_RESET,
+                },
+            ],
+            outputs: &[
+                PortMeta {
+                    name: "div2",
+                    index: ClockDiv::OUT_DIV2,
+                },
+                PortMeta {
+                    name: "div4",
+                    index: ClockDiv::OUT_DIV4,
+                },
+                PortMeta {
+                    name: "div8",
+                    index: ClockDiv::OUT_DIV8,
+                },
+                PortMeta {
+                    name: "div3",
+                    index: ClockDiv::OUT_DIV3,
+                },
+            ],
+            params: &[],
+        },
+        factory: create_clock_div,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "delay",
+            display_name: "Delay",
+            inputs: &[
+                PortMeta {
+                    name: "audio",
+                    index: Delay::IN_AUDIO,
+                },
+                PortMeta {
+                    name: "time_cv",
+                    index: Delay::IN_TIME_CV,
+                },
+                PortMeta {
+                    name: "fb_cv",
+                    index: Delay::IN_FB_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "mix",
+                index: Delay::OUT_MIX,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Time",
+                    index: Delay::PARAM_TIME,
+                    min: 1.0,
+                    max: Delay::MAX_TIME_MS,
+                    default: 250.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Feedback",
+                    index: Delay::PARAM_FEEDBACK,
+                    min: 0.0,
+                    max: 0.95,
+                    default: 0.35,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Mix",
+                    index: Delay::PARAM_MIX,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.3,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_delay,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "wavefolder",
+            display_name: "Wavefolder",
+            inputs: &[
+                PortMeta {
+                    name: "audio",
+                    index: Wavefolder::IN_AUDIO,
+                },
+                PortMeta {
+                    name: "drive_cv",
+                    index: Wavefolder::IN_DRIVE_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "audio",
+                index: Wavefolder::OUT_AUDIO,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Drive",
+                    index: Wavefolder::PARAM_DRIVE,
+                    min: 0.1,
+                    max: 20.0,
+                    default: 1.5,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Symmetry",
+                    index: Wavefolder::PARAM_SYMMETRY,
+                    min: -1.0,
+                    max: 1.0,
+                    default: 0.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Mix",
+                    index: Wavefolder::PARAM_MIX,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_wavefolder,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "lpg",
+            display_name: "LPG",
+            inputs: &[
+                PortMeta {
+                    name: "audio",
+                    index: Lpg::IN_AUDIO,
+                },
+                PortMeta {
+                    name: "cv",
+                    index: Lpg::IN_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "audio",
+                index: Lpg::OUT_AUDIO,
+            }],
+            params: &[ParamMeta {
+                name: "Offset",
+                index: Lpg::PARAM_OFFSET,
+                min: 0.0,
+                max: 1.0,
+                default: 0.0,
+                choices: &[],
+            }],
+        },
+        factory: create_lpg,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "function",
+            display_name: "Function",
+            inputs: &[PortMeta {
+                name: "trig",
+                index: Function::IN_TRIG,
+            }],
+            outputs: &[
+                PortMeta {
+                    name: "cv",
+                    index: Function::OUT_CV,
+                },
+                PortMeta {
+                    name: "eoc",
+                    index: Function::OUT_EOC,
+                },
+            ],
+            params: &[
+                ParamMeta {
+                    name: "Attack",
+                    index: Function::PARAM_ATTACK,
+                    min: 0.001,
+                    max: 5.0,
+                    default: 0.01,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Decay",
+                    index: Function::PARAM_DECAY,
+                    min: 0.001,
+                    max: 5.0,
+                    default: 0.2,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Cycle",
+                    index: Function::PARAM_CYCLE,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 0.0,
+                    choices: &["Off", "On"],
+                },
+            ],
+        },
+        factory: create_function,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "ring_mod",
+            display_name: "Ring Mod",
+            inputs: &[
+                PortMeta {
+                    name: "a",
+                    index: RingMod::IN_A,
+                },
+                PortMeta {
+                    name: "b",
+                    index: RingMod::IN_B,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "mix",
+                index: RingMod::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Level",
+                index: RingMod::PARAM_LEVEL,
+                min: 0.0,
+                max: 2.0,
+                default: 1.0,
+                choices: &[],
+            }],
+        },
+        factory: create_ring_mod,
+    },
+    Entry {
+        info: ModuleTypeInfo {
             kind: "oscilloscope",
             display_name: "Scope",
             inputs: &[PortMeta {
@@ -507,28 +1129,32 @@ static ENTRIES: &[Entry] = &[
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Ch1 Offset",
                     index: Io::param_capture_offset(0),
                     min: -1.0,
                     max: 1.0,
                     default: 0.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Ch2 Scale",
                     index: Io::param_capture_scale(1),
                     min: 0.0,
                     max: 2.0,
                     default: 1.0,
-                },
+        choices: &[],
+    },
                 ParamMeta {
                     name: "Ch2 Offset",
                     index: Io::param_capture_offset(1),
                     min: -1.0,
                     max: 1.0,
                     default: 0.0,
-                },
+        choices: &[],
+    },
             ],
         },
         factory: create_io,

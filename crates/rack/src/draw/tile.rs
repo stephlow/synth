@@ -22,6 +22,8 @@ pub struct TileView<'a> {
     pub soft: bool,
     /// Live samples for scope glyph.
     pub samples: Option<&'a [f32]>,
+    /// Quantizer scale mask for degree glyph.
+    pub scale_mask: Option<u16>,
 }
 
 pub fn draw_tile(buf: &mut Buffer, area: Rect, view: &TileView<'_>) {
@@ -169,6 +171,7 @@ pub fn draw_tile(buf: &mut Buffer, area: Rect, view: &TileView<'_>) {
             intensity: fill_level,
             style: body_style,
             samples: view.samples,
+            scale_mask: view.scale_mask,
         },
     );
 }

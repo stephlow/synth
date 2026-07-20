@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::graph::Graph;
 use crate::module::BlockContext;
 use crate::modules::{
-    Attenuverter, Envelope, Io, Lfo, MidiToCv, Oscilloscope, Vca, Vcf, Vco,
+    Envelope, Io, Lfo, MidiToCv, Mixer, Noise, Oscilloscope, Quantizer, Sequencer, Vca, Vcf, Vco,
 };
+use crate::modules::scale::SCALES;
 use crate::registry;
 use crate::MAX_BLOCK_FRAMES;
 
@@ -108,9 +109,9 @@ pub struct IoEndpoint {
     pub module: Option<u32>,
     /// Calibration knobs (scale/offset) exposed on a control surface.
     pub params: Vec<ParamInfo>,
-    /// Optional lattice position for rack / other UIs (ignored by DSP).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordinates: Option<ModuleCoordinates>,
+    /// Lattice position for rack / other UIs (required; ignored by DSP).
+    #[serde(default)]
+    pub coordinates: ModuleCoordinates,
 }
 
 /// Lattice coordinates for a module on a control surface (ignored by DSP).
@@ -118,6 +119,12 @@ pub struct IoEndpoint {
 pub struct ModuleCoordinates {
     pub x: u32,
     pub y: u32,
+}
+
+impl ModuleCoordinates {
+    pub const fn new(x: u32, y: u32) -> Self {
+        Self { x, y }
+    }
 }
 
 /// Preferred control-surface canvas size (cell counts; ignored by DSP).
@@ -142,9 +149,10 @@ pub struct ModuleInstance {
     /// For `kind == "io"`: capture channel count (default 2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub io_capture_channels: Option<usize>,
-    /// Optional lattice position for rack / other UIs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordinates: Option<ModuleCoordinates>,
+    /// Lattice position for rack / other UIs (required; ignored by DSP).
+    /// Missing in old JSON deserializes as `(0,0)`.
+    #[serde(default)]
+    pub coordinates: ModuleCoordinates,
 }
 
 impl ModuleInstance {
@@ -181,6 +189,7 @@ pub struct PatchRoles {
     pub note_source: u32,
     pub activity_gate: u32,
     pub external_input: u32,
+    /// Mono voice output tap (hardware L/R both get this sum).
     pub output_tap_module: u32,
     pub output_tap_port: usize,
 }
@@ -263,7 +272,7 @@ pub struct BuiltPatch {
     pub activity_gate: usize,
     /// Dense graph index for external capture Io.
     pub external_input: usize,
-    /// Tap index for this voice's rendered audio.
+    /// Tap index for this voice's mono audio.
     pub output_tap: usize,
     /// Stable id → dense graph index (for set_param routing).
     pub id_to_index: Vec<(u32, usize)>,
@@ -283,7 +292,19 @@ impl BuiltPatch {
 }
 
 impl Default for Patch {
-    /// Classic subtractive voice — same topology as the former `DefaultPatch`.
+    /// Multi-part default: free-running sequenced bass + kick + snare, and a
+    /// MIDI/keyboard lead. Voices are averaged in the synth, so free-running
+    /// layers stay at natural level; the lead is mixed hotter so poly notes
+    /// cut through after `/ NUM_VOICES`.
+    ///
+    /// Lattice (signal flow mostly left → right within each row):
+    /// ```text
+    ///   Clock  BassSeq Quant BassVCO BassVCF BassEnv BassVCA
+    ///   SnClk  KickSeq      KickVCO        KickEnv KickVCA
+    ///          SnareSeq Noise              SnEnv   SnVCA
+    ///   MIDI   LeadVCO LeadVCF LeadEnvA LeadEnvF LeadVCA  Mix Scope
+    ///   In     Out
+    /// ```
     fn default() -> Self {
         let mut next_id = 0u32;
         let mut alloc = || {
@@ -292,18 +313,50 @@ impl Default for Patch {
             id
         };
 
+        let at = ModuleCoordinates::new;
+        let semi = |s: f32| s / 12.0;
+        let minor_pent = SCALES
+            .iter()
+            .position(|s| s.name == "Minor Pentatonic")
+            .unwrap_or(11) as f32;
+
+        // --- roles / shared ---
         let midi_to_cv = alloc();
-        let vco = alloc();
-        let io_in = alloc();
-        let amp_env = alloc();
-        let filter_env = alloc();
-        let lfo = alloc();
-        let lfo_depth = alloc();
-        let vcf = alloc();
-        let vca = alloc();
+        let clock = alloc();
+        let snare_clock = alloc();
+        let mixer = alloc();
         let scope = alloc();
+        let io_in = alloc();
+
+        // --- bassline ---
+        let bass_seq = alloc();
+        let bass_quant = alloc();
+        let bass_vco = alloc();
+        let bass_vcf = alloc();
+        let bass_env = alloc();
+        let bass_vca = alloc();
+
+        // --- kick ---
+        let kick_seq = alloc();
+        let kick_vco = alloc();
+        let kick_env = alloc();
+        let kick_vca = alloc();
+
+        // --- snare ---
+        let snare_seq = alloc();
+        let snare_noise = alloc();
+        let snare_env = alloc();
+        let snare_vca = alloc();
+
+        // --- lead (MIDI) ---
+        let lead_vco = alloc();
+        let lead_vcf = alloc();
+        let lead_env_amp = alloc();
+        let lead_env_filt = alloc();
+        let lead_vca = alloc();
 
         let modules = vec![
+            // Shared control / clock
             ModuleInstance {
                 id: midi_to_cv,
                 kind: "midi_to_cv".into(),
@@ -311,16 +364,299 @@ impl Default for Patch {
                 params: vec![],
                 io_send_channels: None,
                 io_capture_channels: None,
-                coordinates: None,
+                coordinates: at(0, 3),
             },
             ModuleInstance {
-                id: vco,
+                id: clock,
+                kind: "lfo".into(),
+                name: "Clock".into(),
+                // ~4 Hz → 16th-ish feel for bass/kick sequencers.
+                params: vec![(Lfo::PARAM_RATE, 4.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(0, 0),
+            },
+            ModuleInstance {
+                id: snare_clock,
+                kind: "lfo".into(),
+                name: "Snare Clock".into(),
+                // Half rate → backbeat-ish snare against the master clock.
+                params: vec![(Lfo::PARAM_RATE, 2.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(0, 1),
+            },
+            // Bass
+            ModuleInstance {
+                id: bass_seq,
+                kind: "sequencer".into(),
+                name: "Bass Seq".into(),
+                params: vec![
+                    // 16 steps ≈ 4 bars of 4: A A (same) then B C (progression).
+                    (Sequencer::PARAM_STEPS, 16.0),
+                    (Sequencer::PARAM_GATE_LEN, 0.4),
+                    // Bar 1 — home groove (minor pent, octave below).
+                    (Sequencer::param_step(0), semi(-12.0)), // root
+                    (Sequencer::param_step(1), semi(-12.0)),
+                    (Sequencer::param_step(2), semi(-10.0)), // b3
+                    (Sequencer::param_step(3), semi(-7.0)),  // 5
+                    // Bar 2 — same as bar 1.
+                    (Sequencer::param_step(4), semi(-12.0)),
+                    (Sequencer::param_step(5), semi(-12.0)),
+                    (Sequencer::param_step(6), semi(-10.0)),
+                    (Sequencer::param_step(7), semi(-7.0)),
+                    // Bar 3 — lift / climb.
+                    (Sequencer::param_step(8), semi(-10.0)),
+                    (Sequencer::param_step(9), semi(-8.0)),  // 4
+                    (Sequencer::param_step(10), semi(-7.0)),
+                    (Sequencer::param_step(11), semi(-5.0)), // b7
+                    // Bar 4 — peak then drop back home.
+                    (Sequencer::param_step(12), semi(-3.0)), // 9 / 2 up
+                    (Sequencer::param_step(13), semi(-5.0)),
+                    (Sequencer::param_step(14), semi(-7.0)),
+                    (Sequencer::param_step(15), semi(-12.0)), // root
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(1, 0),
+            },
+            ModuleInstance {
+                id: bass_quant,
+                kind: "quantizer".into(),
+                name: "Bass Quant".into(),
+                params: vec![
+                    (Quantizer::PARAM_SCALE, minor_pent),
+                    (Quantizer::PARAM_ROOT, 0.0),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(2, 0),
+            },
+            ModuleInstance {
+                id: bass_vco,
                 kind: "vco".into(),
-                name: "VCO".into(),
+                name: "Bass VCO".into(),
+                params: vec![(Vco::PARAM_TUNE, -1.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(3, 0),
+            },
+            ModuleInstance {
+                id: bass_vcf,
+                kind: "vcf".into(),
+                name: "Bass VCF".into(),
+                params: vec![
+                    (Vcf::PARAM_CUTOFF, 480.0),
+                    (Vcf::PARAM_RESONANCE, 0.35),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(4, 0),
+            },
+            ModuleInstance {
+                id: bass_env,
+                kind: "envelope".into(),
+                name: "Bass Env".into(),
+                params: vec![
+                    (Envelope::PARAM_ATTACK, 0.002),
+                    (Envelope::PARAM_DECAY, 0.18),
+                    (Envelope::PARAM_SUSTAIN, 0.15),
+                    (Envelope::PARAM_RELEASE, 0.08),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(5, 0),
+            },
+            ModuleInstance {
+                id: bass_vca,
+                kind: "vca".into(),
+                name: "Bass VCA".into(),
+                params: vec![(Vca::PARAM_LEVEL, 1.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(6, 0),
+            },
+            // Kick — 4-on-the-floor via short gate + low sine.
+            ModuleInstance {
+                id: kick_seq,
+                kind: "sequencer".into(),
+                name: "Kick Seq".into(),
+                params: vec![
+                    (Sequencer::PARAM_STEPS, 4.0),
+                    (Sequencer::PARAM_GATE_LEN, 0.12),
+                    (Sequencer::param_step(0), 0.0),
+                    (Sequencer::param_step(1), 0.0),
+                    (Sequencer::param_step(2), 0.0),
+                    (Sequencer::param_step(3), 0.0),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(1, 1),
+            },
+            ModuleInstance {
+                id: kick_vco,
+                kind: "vco".into(),
+                name: "Kick VCO".into(),
+                // ~55 Hz ballpark (A1-ish relative to 440).
+                params: vec![(Vco::PARAM_TUNE, -3.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(3, 1),
+            },
+            ModuleInstance {
+                id: kick_env,
+                kind: "envelope".into(),
+                name: "Kick Env".into(),
+                params: vec![
+                    (Envelope::PARAM_ATTACK, 0.001),
+                    (Envelope::PARAM_DECAY, 0.22),
+                    (Envelope::PARAM_SUSTAIN, 0.0),
+                    (Envelope::PARAM_RELEASE, 0.08),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(5, 1),
+            },
+            ModuleInstance {
+                id: kick_vca,
+                kind: "vca".into(),
+                name: "Kick VCA".into(),
+                params: vec![(Vca::PARAM_LEVEL, 1.1)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(6, 1),
+            },
+            // Snare — noise burst on half-rate clock.
+            ModuleInstance {
+                id: snare_seq,
+                kind: "sequencer".into(),
+                name: "Snare Seq".into(),
+                params: vec![
+                    (Sequencer::PARAM_STEPS, 2.0),
+                    (Sequencer::PARAM_GATE_LEN, 0.1),
+                    (Sequencer::param_step(0), 0.0),
+                    (Sequencer::param_step(1), 0.0),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(1, 2),
+            },
+            ModuleInstance {
+                id: snare_noise,
+                kind: "noise".into(),
+                name: "Snare Noise".into(),
+                params: vec![],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(3, 2),
+            },
+            ModuleInstance {
+                id: snare_env,
+                kind: "envelope".into(),
+                name: "Snare Env".into(),
+                params: vec![
+                    (Envelope::PARAM_ATTACK, 0.001),
+                    (Envelope::PARAM_DECAY, 0.12),
+                    (Envelope::PARAM_SUSTAIN, 0.0),
+                    (Envelope::PARAM_RELEASE, 0.06),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(5, 2),
+            },
+            ModuleInstance {
+                id: snare_vca,
+                kind: "vca".into(),
+                name: "Snare VCA".into(),
+                params: vec![(Vca::PARAM_LEVEL, 0.85)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(6, 2),
+            },
+            // Lead — keyboard / MIDI.
+            ModuleInstance {
+                id: lead_vco,
+                kind: "vco".into(),
+                name: "Lead VCO".into(),
                 params: vec![(Vco::PARAM_TUNE, 0.0)],
                 io_send_channels: None,
                 io_capture_channels: None,
-                coordinates: None,
+                coordinates: at(1, 3),
+            },
+            ModuleInstance {
+                id: lead_vcf,
+                kind: "vcf".into(),
+                name: "Lead VCF".into(),
+                params: vec![
+                    (Vcf::PARAM_CUTOFF, 1800.0),
+                    (Vcf::PARAM_RESONANCE, 0.22),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(2, 3),
+            },
+            ModuleInstance {
+                id: lead_env_amp,
+                kind: "envelope".into(),
+                name: "Lead Amp".into(),
+                params: vec![
+                    (Envelope::PARAM_ATTACK, 0.01),
+                    (Envelope::PARAM_DECAY, 0.15),
+                    (Envelope::PARAM_SUSTAIN, 0.65),
+                    (Envelope::PARAM_RELEASE, 0.25),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(3, 3),
+            },
+            ModuleInstance {
+                id: lead_env_filt,
+                kind: "envelope".into(),
+                name: "Lead Filt".into(),
+                params: vec![
+                    (Envelope::PARAM_ATTACK, 0.02),
+                    (Envelope::PARAM_DECAY, 0.25),
+                    (Envelope::PARAM_SUSTAIN, 0.3),
+                    (Envelope::PARAM_RELEASE, 0.3),
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(4, 3),
+            },
+            ModuleInstance {
+                id: lead_vca,
+                kind: "vca".into(),
+                name: "Lead VCA".into(),
+                params: vec![(Vca::PARAM_LEVEL, 1.0)],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(5, 3),
+            },
+            // Mono mix bus (engine duals this to hardware L+R).
+            ModuleInstance {
+                id: mixer,
+                kind: "mixer".into(),
+                name: "Mix".into(),
+                // Free paths modest so after 4-voice average they sit near lead/4 * hot.
+                // Lead hot so held notes cut through the groove.
+                params: vec![
+                    (Mixer::PARAM_LEVEL_1, 0.45), // bass
+                    (Mixer::PARAM_LEVEL_2, 0.55), // kick
+                    (Mixer::PARAM_LEVEL_3, 0.4),  // snare
+                    (Mixer::PARAM_LEVEL_4, 2.0),  // lead
+                ],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(6, 3),
+            },
+            ModuleInstance {
+                id: scope,
+                kind: "oscilloscope".into(),
+                name: "Scope".into(),
+                params: vec![],
+                io_send_channels: None,
+                io_capture_channels: None,
+                coordinates: at(7, 3),
             },
             ModuleInstance {
                 id: io_in,
@@ -334,86 +670,7 @@ impl Default for Patch {
                 ],
                 io_send_channels: Some(0),
                 io_capture_channels: Some(2),
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: amp_env,
-                kind: "envelope".into(),
-                name: "Envelope".into(),
-                params: vec![
-                    (Envelope::PARAM_ATTACK, 0.01),
-                    (Envelope::PARAM_DECAY, 0.1),
-                    (Envelope::PARAM_SUSTAIN, 0.7),
-                    (Envelope::PARAM_RELEASE, 0.3),
-                ],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: filter_env,
-                kind: "envelope".into(),
-                name: "Envelope".into(),
-                params: vec![
-                    (Envelope::PARAM_ATTACK, 0.05),
-                    (Envelope::PARAM_DECAY, 0.2),
-                    (Envelope::PARAM_SUSTAIN, 0.3),
-                    (Envelope::PARAM_RELEASE, 0.4),
-                ],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: lfo,
-                kind: "lfo".into(),
-                name: "LFO".into(),
-                params: vec![(Lfo::PARAM_RATE, 2.0)],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: lfo_depth,
-                kind: "attenuverter".into(),
-                name: "Attenuverter".into(),
-                params: vec![
-                    (Attenuverter::PARAM_SCALE, 0.2),
-                    (Attenuverter::PARAM_OFFSET, 0.0),
-                ],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: vcf,
-                kind: "vcf".into(),
-                name: "VCF".into(),
-                params: vec![
-                    (Vcf::PARAM_CUTOFF, 1200.0),
-                    (Vcf::PARAM_RESONANCE, 0.15),
-                ],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: vca,
-                kind: "vca".into(),
-                name: "VCA".into(),
-                params: vec![(Vca::PARAM_LEVEL, 1.0)],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
-            },
-            ModuleInstance {
-                id: scope,
-                kind: "oscilloscope".into(),
-                name: "Scope".into(),
-                params: vec![],
-                io_send_channels: None,
-                io_capture_channels: None,
-                coordinates: None,
+                coordinates: at(0, 4),
             },
         ];
 
@@ -432,17 +689,41 @@ impl Default for Patch {
             };
 
         let cables = vec![
-            cable(midi_to_cv, MidiToCv::OUT_PITCH, vco, Vco::IN_PITCH),
-            cable(vco, Vco::OUT_SAW, vcf, Vcf::IN_AUDIO),
-            cable(io_in, 0, vcf, Vcf::IN_AUDIO),
-            cable(filter_env, Envelope::OUT_CV, vcf, Vcf::IN_CUTOFF_CV),
-            cable(lfo, Lfo::OUT_BIPOLAR, lfo_depth, Attenuverter::IN_SIGNAL),
-            cable(lfo_depth, Attenuverter::OUT_SIGNAL, vcf, Vcf::IN_CUTOFF_CV),
-            cable(vcf, Vcf::OUT_LOWPASS, vca, Vca::IN_AUDIO),
-            cable(amp_env, Envelope::OUT_CV, vca, Vca::IN_CV),
-            cable(midi_to_cv, MidiToCv::OUT_GATE, amp_env, Envelope::IN_GATE),
-            cable(midi_to_cv, MidiToCv::OUT_GATE, filter_env, Envelope::IN_GATE),
-            cable(vca, Vca::OUT_AUDIO, scope, Oscilloscope::IN_AUDIO),
+            // --- Bass ---
+            cable(clock, Lfo::OUT_BIPOLAR, bass_seq, Sequencer::IN_CLOCK),
+            cable(bass_seq, Sequencer::OUT_CV, bass_quant, Quantizer::IN_CV),
+            cable(bass_quant, Quantizer::OUT_CV, bass_vco, Vco::IN_PITCH),
+            cable(bass_vco, Vco::OUT_SAW, bass_vcf, Vcf::IN_AUDIO),
+            cable(bass_env, Envelope::OUT_CV, bass_vcf, Vcf::IN_CUTOFF_CV),
+            cable(bass_vcf, Vcf::OUT_LOWPASS, bass_vca, Vca::IN_AUDIO),
+            cable(bass_env, Envelope::OUT_CV, bass_vca, Vca::IN_CV),
+            cable(bass_seq, Sequencer::OUT_GATE, bass_env, Envelope::IN_GATE),
+            // --- Kick ---
+            cable(clock, Lfo::OUT_BIPOLAR, kick_seq, Sequencer::IN_CLOCK),
+            cable(kick_vco, Vco::OUT_SINE, kick_vca, Vca::IN_AUDIO),
+            // Envelope into pitch for a little downward thump.
+            cable(kick_env, Envelope::OUT_CV, kick_vco, Vco::IN_PITCH),
+            cable(kick_env, Envelope::OUT_CV, kick_vca, Vca::IN_CV),
+            cable(kick_seq, Sequencer::OUT_GATE, kick_env, Envelope::IN_GATE),
+            // --- Snare ---
+            cable(snare_clock, Lfo::OUT_BIPOLAR, snare_seq, Sequencer::IN_CLOCK),
+            cable(snare_noise, Noise::OUT_WHITE, snare_vca, Vca::IN_AUDIO),
+            cable(snare_env, Envelope::OUT_CV, snare_vca, Vca::IN_CV),
+            cable(snare_seq, Sequencer::OUT_GATE, snare_env, Envelope::IN_GATE),
+            // --- Lead (MIDI / keyboard) ---
+            cable(midi_to_cv, MidiToCv::OUT_PITCH, lead_vco, Vco::IN_PITCH),
+            cable(lead_vco, Vco::OUT_SQUARE, lead_vcf, Vcf::IN_AUDIO),
+            cable(lead_env_filt, Envelope::OUT_CV, lead_vcf, Vcf::IN_CUTOFF_CV),
+            cable(lead_vcf, Vcf::OUT_LOWPASS, lead_vca, Vca::IN_AUDIO),
+            cable(lead_env_amp, Envelope::OUT_CV, lead_vca, Vca::IN_CV),
+            cable(midi_to_cv, MidiToCv::OUT_GATE, lead_env_amp, Envelope::IN_GATE),
+            cable(midi_to_cv, MidiToCv::OUT_GATE, lead_env_filt, Envelope::IN_GATE),
+            // --- Mono mix bus ---
+            cable(bass_vca, Vca::OUT_AUDIO, mixer, Mixer::IN_1),
+            cable(kick_vca, Vca::OUT_AUDIO, mixer, Mixer::IN_2),
+            cable(snare_vca, Vca::OUT_AUDIO, mixer, Mixer::IN_3),
+            cable(lead_vca, Vca::OUT_AUDIO, mixer, Mixer::IN_4),
+            cable(mixer, Mixer::OUT_MIX, scope, Oscilloscope::IN_AUDIO),
         ];
 
         let audio_in_params = vec![
@@ -476,45 +757,60 @@ impl Default for Patch {
             },
         ];
 
+        // Master Io channel order: L, R, pitch CV, gate CV.
         let audio_out_params = vec![
             ParamInfo {
-                name: "Audio Scale".into(),
+                name: "Audio L Scale".into(),
                 param: Io::param_send_scale(0),
                 min: 0.0,
                 max: 2.0,
                 default_value: 1.0,
             },
             ParamInfo {
-                name: "Audio Offset".into(),
+                name: "Audio L Offset".into(),
                 param: Io::param_send_offset(0),
                 min: -1.0,
                 max: 1.0,
                 default_value: 0.0,
             },
             ParamInfo {
-                name: "Pitch Scale".into(),
+                name: "Audio R Scale".into(),
                 param: Io::param_send_scale(1),
                 min: 0.0,
                 max: 2.0,
                 default_value: 1.0,
             },
             ParamInfo {
-                name: "Pitch Offset".into(),
+                name: "Audio R Offset".into(),
                 param: Io::param_send_offset(1),
                 min: -1.0,
                 max: 1.0,
                 default_value: 0.0,
             },
             ParamInfo {
-                name: "Gate Scale".into(),
+                name: "Pitch Scale".into(),
                 param: Io::param_send_scale(2),
                 min: 0.0,
                 max: 2.0,
                 default_value: 1.0,
             },
             ParamInfo {
-                name: "Gate Offset".into(),
+                name: "Pitch Offset".into(),
                 param: Io::param_send_offset(2),
+                min: -1.0,
+                max: 1.0,
+                default_value: 0.0,
+            },
+            ParamInfo {
+                name: "Gate Scale".into(),
+                param: Io::param_send_scale(3),
+                min: 0.0,
+                max: 2.0,
+                default_value: 1.0,
+            },
+            ParamInfo {
+                name: "Gate Offset".into(),
+                param: Io::param_send_offset(3),
                 min: -1.0,
                 max: 1.0,
                 default_value: 0.0,
@@ -532,7 +828,7 @@ impl Default for Patch {
                 device_channel_offset: 0,
                 module: None,
                 params: audio_out_params,
-                coordinates: None,
+                coordinates: at(1, 4),
             },
             IoEndpoint {
                 id: IO_ENDPOINT_AUDIO_IN.into(),
@@ -544,7 +840,7 @@ impl Default for Patch {
                 device_channel_offset: 0,
                 module: Some(io_in),
                 params: audio_in_params,
-                coordinates: None,
+                coordinates: at(0, 4),
             },
         ];
 
@@ -555,13 +851,17 @@ impl Default for Patch {
             cables,
             roles: PatchRoles {
                 note_source: midi_to_cv,
-                activity_gate: amp_env,
+                // Lead amp envelope drives voice activity / steal protection.
+                activity_gate: lead_env_amp,
                 external_input: io_in,
                 output_tap_module: scope,
                 output_tap_port: Oscilloscope::OUT_AUDIO,
             },
             io_endpoints,
-            canvas: None,
+            canvas: Some(PatchCanvas {
+                width: 16,
+                height: 10,
+            }),
         }
     }
 }
@@ -586,6 +886,7 @@ impl Patch {
             (None, None)
         };
 
+        let coordinates = self.next_free_coordinates();
         self.modules.push(ModuleInstance {
             id,
             kind: kind.to_string(),
@@ -593,9 +894,34 @@ impl Patch {
             params,
             io_send_channels: io_send,
             io_capture_channels: io_capture,
-            coordinates: None,
+            coordinates,
         });
         Ok(id)
+    }
+
+    /// First lattice cell not occupied by a module or IO endpoint.
+    fn next_free_coordinates(&self) -> ModuleCoordinates {
+        let mut occupied: Vec<(u32, u32)> = self
+            .modules
+            .iter()
+            .map(|m| (m.coordinates.x, m.coordinates.y))
+            .chain(
+                self.io_endpoints
+                    .iter()
+                    .map(|e| (e.coordinates.x, e.coordinates.y)),
+            )
+            .collect();
+        occupied.sort_unstable();
+        occupied.dedup();
+        // Row-major scan; keep growth bounded for large patches.
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                if occupied.binary_search(&(x, y)).is_err() {
+                    return ModuleCoordinates::new(x, y);
+                }
+            }
+        }
+        ModuleCoordinates::new(0, 64)
     }
 
     /// Set lattice coordinates for a module (control surface only).
@@ -610,7 +936,7 @@ impl Patch {
             .iter_mut()
             .find(|m| m.id == id)
             .ok_or(PatchError::UnknownModule(id))?;
-        m.coordinates = Some(ModuleCoordinates { x, y });
+        m.coordinates = ModuleCoordinates { x, y };
         Ok(())
     }
 
@@ -1019,6 +1345,27 @@ mod tests {
     }
 
     #[test]
+    fn default_patch_positions_every_module_and_endpoint() {
+        let patch = Patch::default();
+        assert!(!patch.modules.is_empty());
+        // Coordinates are required (non-optional type); also check uniqueness
+        // of the default layout so tiles don't stack.
+        let mut cells: Vec<(u32, u32)> = patch
+            .modules
+            .iter()
+            .map(|m| (m.coordinates.x, m.coordinates.y))
+            .collect();
+        cells.sort_unstable();
+        let before = cells.len();
+        cells.dedup();
+        assert_eq!(cells.len(), before, "default modules share a lattice cell");
+        for ep in &patch.io_endpoints {
+            // Type guarantees presence; assert sensible values for default layout.
+            assert!(ep.coordinates.x < 16 && ep.coordinates.y < 16);
+        }
+    }
+
+    #[test]
     fn json_round_trip_preserves_topology() {
         let patch = Patch::default();
         let json = patch.to_json().unwrap();
@@ -1045,7 +1392,7 @@ mod tests {
         assert!(json.contains("\"x\": 3"));
         let loaded = Patch::from_json(&json).unwrap();
         let m = loaded.modules.iter().find(|m| m.id == id).unwrap();
-        assert_eq!(m.coordinates, Some(ModuleCoordinates { x: 3, y: 5 }));
+        assert_eq!(m.coordinates, ModuleCoordinates { x: 3, y: 5 });
         assert_eq!(
             loaded.canvas,
             Some(PatchCanvas {

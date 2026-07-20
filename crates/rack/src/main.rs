@@ -14,7 +14,9 @@ mod draw;
 mod keys;
 mod menu_build;
 mod model;
+mod param_fmt;
 mod place;
+mod scale_ui;
 
 use crossterm::event::{Event, EventStream, KeyEventKind};
 use crossterm::terminal::{

@@ -135,7 +135,11 @@ impl App {
         if menu.title != "theme" {
             return;
         }
-        if let Some(id) = ThemeId::ALL.get(menu.selected).copied() {
+        let theme_index = match menu.selected_entry().and_then(|e| e.action.as_ref()) {
+            Some(crate::model::MenuAction::SetTheme { theme_index }) => *theme_index,
+            _ => return,
+        };
+        if let Some(id) = ThemeId::ALL.get(theme_index).copied() {
             self.theme_preview = Some(id);
             self.status = format!("preview · {}  ·  Enter keep  ·  Esc cancel", id.label());
         }
@@ -175,7 +179,7 @@ impl App {
                 c.height.min(u32::from(u16::MAX)) as u16,
             )
         });
-        // Engine coordinates win for voice modules (persisted layout).
+        // Engine coordinates win for voice modules (required on every module).
         for m in &self.voice_modules {
             if let Some(c) = m.coordinates.as_ref() {
                 self.placement_memory.insert(
@@ -187,7 +191,7 @@ impl App {
                 );
             }
         }
-        // IO endpoint tiles (Audio Out / Audio In) can also carry coordinates.
+        // IO endpoint tiles (Audio Out / Audio In) always carry coordinates.
         for ep in &self.io_endpoints {
             if let Some(c) = ep.coordinates.as_ref() {
                 self.placement_memory.insert(
@@ -559,10 +563,10 @@ impl App {
         let Some(menu) = self.menu_stack.last_mut() else {
             return;
         };
-        if menu.items.is_empty() {
+        let n = menu.filtered_len() as isize;
+        if n == 0 {
             return;
         }
-        let n = menu.items.len() as isize;
         let mut i = menu.selected as isize + delta;
         i = ((i % n) + n) % n;
         menu.selected = i as usize;
@@ -572,6 +576,57 @@ impl App {
         } else {
             self.refresh_status();
         }
+    }
+
+    /// Type-to-filter: append a character to the active menu filter.
+    pub fn menu_filter_char(&mut self, ch: char) {
+        let Some(menu) = self.menu_stack.last_mut() else {
+            return;
+        };
+        if ch.is_control() {
+            return;
+        }
+        menu.push_filter_char(ch.to_ascii_lowercase());
+        let is_theme = menu.title == "theme";
+        if is_theme {
+            self.preview_theme_from_menu();
+        } else {
+            self.refresh_status();
+        }
+    }
+
+    /// Backspace on the menu filter. Returns true if a char was removed.
+    pub fn menu_filter_backspace(&mut self) -> bool {
+        let Some(menu) = self.menu_stack.last_mut() else {
+            return false;
+        };
+        if !menu.pop_filter_char() {
+            return false;
+        }
+        let is_theme = menu.title == "theme";
+        if is_theme {
+            self.preview_theme_from_menu();
+        } else {
+            self.refresh_status();
+        }
+        true
+    }
+
+    /// Clear filter without leaving the menu. Returns true if filter was non-empty.
+    pub fn menu_filter_clear(&mut self) -> bool {
+        let Some(menu) = self.menu_stack.last_mut() else {
+            return false;
+        };
+        if !menu.clear_filter() {
+            return false;
+        }
+        let is_theme = menu.title == "theme";
+        if is_theme {
+            self.preview_theme_from_menu();
+        } else {
+            self.refresh_status();
+        }
+        true
     }
 
     pub fn port_name(&self, module_id: u32, port: u32, is_output: bool) -> String {
@@ -804,11 +859,45 @@ impl App {
         direction: f32,
         fine: bool,
     ) -> Option<(u32, u32, f32)> {
-        let c = self.controls.get(control_index)?;
-        let step = (c.max - c.min) * if fine { 0.002 } else { 0.02 };
+        let c = self.controls.get(control_index)?.clone();
         let v = self.values.get_mut(control_index)?;
-        *v = (*v + direction * step).clamp(c.min, c.max);
+        *v = crate::param_fmt::step_value(&c, *v, direction, fine, &self.module_types);
         Some((c.module, c.param, *v))
+    }
+
+    /// Formatted param value (scale names, integer steps, or float).
+    pub fn format_param(&self, control_index: usize) -> String {
+        let Some(c) = self.controls.get(control_index) else {
+            return String::new();
+        };
+        let v = self.values.get(control_index).copied().unwrap_or(0.0);
+        crate::param_fmt::format_value(c, v, &self.module_types)
+    }
+
+    /// Scale pitch-class mask for a quantizer module (from its Scale param), if any.
+    pub fn quantizer_scale_mask(&self, module_idx: usize) -> Option<u16> {
+        let m = self.modules.get(module_idx)?;
+        if m.kind != "quantizer" {
+            return None;
+        }
+        for it in &m.items {
+            let Item::Param { control_index } = it else {
+                continue;
+            };
+            let c = self.controls.get(*control_index)?;
+            if c.name != "Scale" {
+                continue;
+            }
+            let v = self.values.get(*control_index).copied().unwrap_or(1.0);
+            let choices = crate::param_fmt::choices_for(c, &self.module_types);
+            let idx = if choices.is_empty() {
+                v.round().max(0.0) as usize
+            } else {
+                v.round().clamp(0.0, (choices.len() - 1) as f32) as usize
+            };
+            return Some(crate::scale_ui::mask_for_index(idx));
+        }
+        None
     }
 
     pub fn param_indices_for_module(&self, module_idx: usize) -> Vec<usize> {
@@ -845,9 +934,9 @@ impl App {
     pub fn refresh_status(&mut self) {
         if let Some(ci) = self.param_edit {
             if let Some(c) = self.controls.get(ci) {
-                let v = self.values.get(ci).copied().unwrap_or(0.0);
+                let shown = self.format_param(ci);
                 self.status = format!(
-                    "PARAM {}  ·  {v:.3}  ·  -/= adjust  _/+ fine  j/k sibling  Esc back",
+                    "PARAM {}  ·  {shown}  ·  -/= adjust  _/+ fine  j/k sibling  Esc back",
                     c.name
                 );
                 return;
@@ -869,14 +958,20 @@ impl App {
 
         if let Some(menu) = self.menu_stack.last() {
             let sel = menu
-                .items
-                .get(menu.selected)
+                .selected_entry()
                 .map(|e| e.label.as_str())
                 .unwrap_or("—");
-            self.status = format!(
-                "MENU {}  ·  {}  ·  Enter  ·  Esc back",
-                menu.title, sel
-            );
+            if menu.filter.is_empty() {
+                self.status = format!(
+                    "MENU {}  ·  {}  ·  type to filter  ·  Enter  ·  Esc back",
+                    menu.title, sel
+                );
+            } else {
+                self.status = format!(
+                    "MENU {}  ·  /{}  ·  {}  ·  Enter  ·  Bksp/Esc clear",
+                    menu.title, menu.filter, sel
+                );
+            }
             return;
         }
 

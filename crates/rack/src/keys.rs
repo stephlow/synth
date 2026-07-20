@@ -126,13 +126,54 @@ async fn handle_menu(
     code: KeyCode,
 ) {
     match code {
-        KeyCode::Esc | KeyCode::Left | KeyCode::Char('h') => {
+        KeyCode::Esc => {
+            // Clear filter first so submenus keep easy re-search; then pop.
+            if !app.menu_filter_clear() {
+                app.pop_menu();
+            }
+        }
+        KeyCode::Left => {
             app.pop_menu();
         }
-        KeyCode::Up | KeyCode::Char('k') => app.menu_selected_delta(-1),
-        KeyCode::Down | KeyCode::Char('j') => app.menu_selected_delta(1),
-        KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
+        KeyCode::Backspace => {
+            if !app.menu_filter_backspace() {
+                app.pop_menu();
+            }
+        }
+        KeyCode::Up => app.menu_selected_delta(-1),
+        KeyCode::Down => app.menu_selected_delta(1),
+        // Keep j/k as navigation (not filter letters).
+        KeyCode::Char('k') => app.menu_selected_delta(-1),
+        KeyCode::Char('j') => app.menu_selected_delta(1),
+        KeyCode::Enter | KeyCode::Right => {
             activate_menu_item(app, client).await;
+        }
+        // `l` opens like Enter when not filtering; while typing, it filters.
+        KeyCode::Char('l') => {
+            let filtering = app
+                .menu_stack
+                .last()
+                .is_some_and(|m| !m.filter.is_empty());
+            if filtering {
+                app.menu_filter_char('l');
+            } else {
+                activate_menu_item(app, client).await;
+            }
+        }
+        // `h` pops when filter empty; otherwise filters (e.g. "highpass").
+        KeyCode::Char('h') => {
+            let filtering = app
+                .menu_stack
+                .last()
+                .is_some_and(|m| !m.filter.is_empty());
+            if filtering {
+                app.menu_filter_char('h');
+            } else {
+                app.pop_menu();
+            }
+        }
+        KeyCode::Char(ch) if !ch.is_control() => {
+            app.menu_filter_char(ch);
         }
         _ => {}
     }
@@ -204,7 +245,7 @@ async fn activate_menu_item(
     let action = app
         .menu_stack
         .last()
-        .and_then(|m| m.items.get(m.selected))
+        .and_then(|m| m.selected_entry())
         .and_then(|e| e.action.clone());
 
     let Some(action) = action else {
@@ -391,8 +432,11 @@ async fn activate_menu_item(
                         .position(|m| matches!(m.id, ModuleId::Keyboard));
                     if let Some(idx) = kbd {
                         let sel = top.selected;
+                        let filter = top.filter.clone();
                         let mut menu = menu_build::notes_menu(app, idx);
-                        menu.selected = sel.min(menu.items.len().saturating_sub(1));
+                        menu.filter = filter;
+                        menu.selected = sel;
+                        menu.clamp_selection();
                         if let Some(slot) = app.menu_stack.last_mut() {
                             *slot = menu;
                         }

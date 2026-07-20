@@ -112,7 +112,7 @@ message IoEndpointDescriptor {
   uint32 channels = 4;
   // Patch-owned device binding ("default" or a cpal device name).
   string device_name = 5;
-  // Optional lattice position for control surfaces (e.g. master Audio Out).
+  // Lattice position for control surfaces (always set by the engine).
   ModuleCoordinates coordinates = 6;
 }
 
@@ -191,6 +191,9 @@ message ParamTypeDescriptor {
   float min = 3;
   float max = 4;
   float default_value = 5;
+  // When non-empty, the param is discrete: rounded value indexes into this list
+  // (e.g. quantizer scale names). Continuous knobs leave this empty.
+  repeated string choices = 6;
 }
 
 message ModuleType {
@@ -219,7 +222,7 @@ message ModuleInstanceDescriptor {
   uint32 id = 1;
   string kind = 2;
   string name = 3;
-  // Optional lattice position; unset when not placed by a control surface.
+  // Lattice position (always set by the engine; clients may move via SetCoordinates).
   ModuleCoordinates coordinates = 4;
 }
 
@@ -235,6 +238,7 @@ message PatchRolesDescriptor {
   uint32 note_source = 1;
   uint32 activity_gate = 2;
   uint32 external_input = 3;
+  // Mono output bus (engine duals to hardware L+R).
   uint32 output_tap_module = 4;
   uint32 output_tap_port = 5;
 }
