@@ -1,6 +1,6 @@
 use crate::module::{BlockContext, Module};
 use crate::modules::{Io, MidiToCv};
-use crate::patch::{DefaultPatchModules, Voice};
+use crate::patch::{DefaultPatch, ModuleInfo, Voice};
 use crate::MAX_BLOCK_FRAMES;
 use wmidi::{Note, Velocity};
 
@@ -31,9 +31,14 @@ pub struct Synth {
     /// Order in which voices were allocated, oldest first; used for voice
     /// stealing when every voice is busy.
     allocation_order: Vec<usize>,
-    /// Module indices shared by every voice's (identical) patch, so
-    /// parameter changes (e.g. MIDI CC) can be broadcast by name.
-    pub modules: DefaultPatchModules,
+    /// Description of every voice's (identical) patch — the module/param
+    /// layout `Patch::build` actually produced, not a hand-kept-in-sync
+    /// list — for anything that wants to build a generic control surface
+    /// (see `describe_patch`).
+    patch_modules: Vec<ModuleInfo>,
+    /// External-input module index shared by every voice's (identical)
+    /// patch, so `set_input_calibration` can target it directly.
+    external_input_module: usize,
     sample_rate: f32,
 
     /// Reused every block to render one voice before it's mixed into
@@ -79,19 +84,22 @@ impl Synth {
     pub const NUM_OUTPUT_CHANNELS: usize = NUM_MASTER_OUTPUT_CHANNELS;
 
     pub fn new(sample_rate: f32) -> Self {
-        // Every voice is built from the same patch, so the module indices
-        // (`DefaultPatchModules`) are identical across all of them; keep
-        // the first voice's copy as the shared one.
-        let (first_voice, modules) = Voice::new_default(sample_rate);
+        // Every voice is built from the same patch, so its module layout is
+        // identical across all of them; keep the first voice's copy as the
+        // shared one.
+        let patch = DefaultPatch;
+        let (first_voice, patch_modules) = Voice::new(&patch, sample_rate);
+        let external_input_module = first_voice.external_input_module();
         let mut voices = Vec::with_capacity(NUM_VOICES);
         voices.push(first_voice);
-        voices.extend((1..NUM_VOICES).map(|_| Voice::new_default(sample_rate).0));
+        voices.extend((1..NUM_VOICES).map(|_| Voice::new(&patch, sample_rate).0));
 
         Self {
             voices,
             voices_map: [None; NUM_VOICES],
             allocation_order: Vec::with_capacity(NUM_VOICES),
-            modules,
+            patch_modules,
+            external_input_module,
             sample_rate,
             voice_scratch: [0.0; MAX_BLOCK_FRAMES],
             mixed: [0.0; MAX_BLOCK_FRAMES],
@@ -140,9 +148,17 @@ impl Synth {
     /// this engine's internal units.
     pub fn set_input_calibration(&mut self, channel: usize, scale: f32, offset: f32) {
         for voice in &mut self.voices {
-            voice.set_param(self.modules.io_in, Io::param_capture_scale(channel), scale);
-            voice.set_param(self.modules.io_in, Io::param_capture_offset(channel), offset);
+            voice.set_param(self.external_input_module, Io::param_capture_scale(channel), scale);
+            voice.set_param(self.external_input_module, Io::param_capture_offset(channel), offset);
         }
+    }
+
+    /// Describes every module the running patch placed in each voice's
+    /// graph — module/param names, kinds, and ranges — for building a
+    /// generic control surface (gRPC descriptors, MIDI CC lookups) without
+    /// hardcoding module indices. See `patch::ModuleInfo`.
+    pub fn describe_patch(&self) -> &[ModuleInfo] {
+        &self.patch_modules
     }
 
     /// Picks a voice to (re)use for a new note on: prefer a slot that is

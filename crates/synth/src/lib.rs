@@ -6,6 +6,7 @@ pub mod patch;
 pub mod rt;
 pub mod synth;
 
+pub use patch::{ModuleInfo, ParamInfo, Patch};
 pub use synth::Synth;
 
 /// Every voice graph is built to handle blocks up to this many frames in

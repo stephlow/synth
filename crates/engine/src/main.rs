@@ -10,9 +10,9 @@ use std::io::{stdin, stdout, Write};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use synth::midi::{setup_midi, MidiMessage};
-use synth::modules::{Envelope, Lfo, Vcf};
-use synth::{rt, Command, EngineMeters, Synth, MAX_BLOCK_FRAMES};
-use tracing::{error, info, warn};
+use synth::modules::{Attenuverter, Envelope, Lfo, Vcf};
+use synth::{rt, Command, EngineMeters, ModuleInfo, Synth, MAX_BLOCK_FRAMES};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 /// How many external-input channels are captured from hardware and fed
@@ -24,7 +24,7 @@ const NUM_EXTERNAL_INPUT_CHANNELS: usize = 2;
 /// between the two independent callbacks doesn't cause audible gaps.
 const RING_BUFFER_FRAMES: usize = MAX_BLOCK_FRAMES * 4;
 
-/// Address the gRPC server listens on; the `console` TUI connects here.
+/// Address the gRPC server listens on; the `rack` TUI connects here.
 const GRPC_ADDR: &str = "127.0.0.1:50051";
 
 #[tokio::main]
@@ -33,16 +33,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    info!(version = env!("CARGO_PKG_VERSION"), "starting engine");
+
     let (tx, rx) = mpsc::channel::<Command>();
 
     // _conn_in needs to be a named parameter, because it needs to be kept alive until the end of the scope
+    debug!("connecting MIDI input");
     let _conn_in = setup_midi(tx.clone())?;
+    info!("MIDI input connected");
 
     // Hardware audio/CV input is optional: if no input device is
     // available (or it fails to open), we fall back to running with
     // silent external-input channels rather than failing to start.
+    debug!("probing for an audio input device");
     let (consumers, _input_stream) = match setup_input_stream() {
-        Ok((stream, consumers)) => (Some(consumers), Some(stream)),
+        Ok((stream, consumers)) => {
+            info!("external audio/CV input connected");
+            (Some(consumers), Some(stream))
+        }
         Err(err) => {
             warn!(%err, "no audio input available; continuing without external audio/CV input");
             (None, None)
@@ -50,23 +58,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let meters = Arc::new(EngineMeters::default());
-    let descriptors = {
+    let (descriptors, cc_targets) = {
         let (_host, _device, config) = host_device_setup()?;
         let sample_rate = config.sample_rate().0 as f32;
         // A throwaway Synth just to read off its (data-independent) module
-        // indices for the control descriptor table below; the real Synth
-        // used for audio lives inside the cpal callback (built in
-        // `make_stream`).
+        // layout for the control descriptor table and MIDI CC map below;
+        // the real Synth used for audio lives inside the cpal callback
+        // (built in `make_stream`).
+        debug!(sample_rate, "probing patch layout");
         let probe = Synth::new(sample_rate);
-        grpc::build_control_descriptors(&probe)
+        let descriptors = grpc::build_control_descriptors(&probe);
+        let cc_targets = CcTargets::resolve(probe.describe_patch());
+        (descriptors, cc_targets)
     };
 
-    let stream = stream_setup_for(rx, consumers, Arc::clone(&meters))?;
+    debug!("setting up audio output stream");
+    let stream = stream_setup_for(rx, consumers, Arc::clone(&meters), cc_targets)?;
     stream.play()?;
+    info!("audio stream started");
 
     info!(addr = GRPC_ADDR, "gRPC server listening");
     grpc::serve(GRPC_ADDR, tx, meters, descriptors).await?;
 
+    info!("engine shutting down");
     Ok(())
 }
 
@@ -74,20 +88,21 @@ pub fn stream_setup_for(
     rx: Receiver<Command>,
     input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
     meters: Arc<EngineMeters>,
+    cc_targets: CcTargets,
 ) -> Result<cpal::Stream, anyhow::Error> {
     let (_host, device, config) = host_device_setup()?;
 
     match config.sample_format() {
-        cpal::SampleFormat::I8 => make_stream::<i8>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::I32 => make_stream::<i32>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::I64 => make_stream::<i64>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::U8 => make_stream::<u8>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::U16 => make_stream::<u16>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::U32 => make_stream::<u32>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::U64 => make_stream::<u64>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config.into(), rx, input, meters),
-        cpal::SampleFormat::F64 => make_stream::<f64>(&device, &config.into(), rx, input, meters),
+        cpal::SampleFormat::I8 => make_stream::<i8>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::I16 => make_stream::<i16>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::I32 => make_stream::<i32>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::I64 => make_stream::<i64>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::U8 => make_stream::<u8>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::U16 => make_stream::<u16>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::U32 => make_stream::<u32>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::U64 => make_stream::<u64>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::F32 => make_stream::<f32>(&device, &config.into(), rx, input, meters, cc_targets),
+        cpal::SampleFormat::F64 => make_stream::<f64>(&device, &config.into(), rx, input, meters, cc_targets),
         sample_format => Err(anyhow::Error::msg(format!(
             "Unsupported sample format '{sample_format}'"
         ))),
@@ -135,10 +150,12 @@ fn select_device(
             let mut input = String::new();
             stdin().read_line(&mut input)?;
             let index: usize = input.trim().parse()?;
-            devices
+            let chosen = devices
                 .into_iter()
                 .nth(index)
-                .ok_or_else(|| anyhow::Error::msg(format!("invalid {kind} device selected")))
+                .ok_or_else(|| anyhow::Error::msg(format!("invalid {kind} device selected")))?;
+            info!(name = %chosen.name().unwrap_or_else(|_| "<unnamed>".into()), kind, index, "device selected");
+            Ok(chosen)
         }
     }
 }
@@ -227,13 +244,53 @@ impl Default for OutputCalibration {
     }
 }
 
+/// Module targets `apply_control_change` drives, resolved once at startup
+/// from the running patch's own self-description (`Synth::describe_patch`)
+/// rather than hardcoded field access — MIDI CC and the gRPC control table
+/// (`grpc::build_control_descriptors`) both derive their targets from the
+/// same source now, so they can't drift apart.
+#[derive(Debug)]
+pub struct CcTargets {
+    vcf: usize,
+    lfo: usize,
+    lfo_depth: usize,
+    /// The amp envelope specifically — two `"envelope"`-kind modules exist
+    /// (amp + filter, both named/kinded identically since they're the same
+    /// module type); `DefaultPatch::build` places the amp envelope first, so
+    /// the first `"envelope"` entry in describe-order is it. This is the one
+    /// place that relies on that ordering; it's only meaningful for
+    /// `DefaultPatch`, the sole `Patch` impl today.
+    amp_env: usize,
+}
+
+impl CcTargets {
+    fn resolve(modules: &[ModuleInfo]) -> Self {
+        let module_of = |kind: &str| {
+            modules
+                .iter()
+                .find(|m| m.kind == kind)
+                .unwrap_or_else(|| panic!("patch has no '{kind}' module for the MIDI CC map"))
+                .module
+        };
+        let targets = Self {
+            vcf: module_of("vcf"),
+            lfo: module_of("lfo"),
+            lfo_depth: module_of("attenuverter"),
+            amp_env: module_of("envelope"),
+        };
+        debug!(?targets, "resolved MIDI CC targets");
+        targets
+    }
+}
+
 /// Maps a MIDI CC controller number + 0..127 value onto a `Synth`
 /// parameter change. This is the "patch bay of the control surface":
 /// extend this list to wire up more knobs. The same param set is exposed
 /// to gRPC clients via `grpc::build_control_descriptors`, so MIDI and the
-/// `console` TUI drive identical targets.
+/// `rack` TUI drive identical targets.
 fn apply_control_change(
     synth: &mut Synth,
+    targets: &CcTargets,
     calibration: &mut OutputCalibration,
     controller: u8,
     value: u8,
@@ -244,29 +301,25 @@ fn apply_control_change(
         74 => {
             // Filter cutoff: 20 Hz .. ~10 kHz, exponential feel.
             let cutoff = 20.0 * (500.0f32).powf(normalized);
-            synth.set_param(synth.modules.vcf, Vcf::PARAM_CUTOFF, cutoff);
+            synth.set_param(targets.vcf, Vcf::PARAM_CUTOFF, cutoff);
         }
         71 => {
             // Filter resonance.
-            synth.set_param(synth.modules.vcf, Vcf::PARAM_RESONANCE, normalized);
+            synth.set_param(targets.vcf, Vcf::PARAM_RESONANCE, normalized);
         }
         1 => {
             // Mod wheel: LFO-to-cutoff depth, in octaves.
-            synth.set_param(
-                synth.modules.lfo_depth,
-                synth::modules::Attenuverter::PARAM_SCALE,
-                normalized * 2.0,
-            );
+            synth.set_param(targets.lfo_depth, Attenuverter::PARAM_SCALE, normalized * 2.0);
         }
         76 => {
             // LFO rate: 0.1 .. ~20 Hz, exponential feel.
             let rate = 0.1 * (200.0f32).powf(normalized);
-            synth.set_param(synth.modules.lfo, Lfo::PARAM_RATE, rate);
+            synth.set_param(targets.lfo, Lfo::PARAM_RATE, rate);
         }
         72 => {
             // Amp envelope release time: 0.01 .. ~5s.
             let release = 0.01 + normalized * 5.0;
-            synth.set_param(synth.modules.amp_env, Envelope::PARAM_RELEASE, release);
+            synth.set_param(targets.amp_env, Envelope::PARAM_RELEASE, release);
         }
         // Master output calibration — see `OutputCalibration`'s doc
         // comment and `Io`'s worked examples for how to derive these for
@@ -297,6 +350,7 @@ pub fn make_stream<T>(
     rx: Receiver<Command>,
     input: Option<[Consumer<f32>; NUM_EXTERNAL_INPUT_CHANNELS]>,
     meters: Arc<EngineMeters>,
+    cc_targets: CcTargets,
 ) -> Result<cpal::Stream, anyhow::Error>
 where
     T: SizedSample + FromSample<f32>,
@@ -325,7 +379,7 @@ where
                         MidiMessage::NoteOff(note, velocity) => synth.note_off(note, velocity),
                         MidiMessage::ProgramChange(_program) => {}
                         MidiMessage::ControlChange(controller, value) => {
-                            apply_control_change(&mut synth, &mut calibration, controller, value)
+                            apply_control_change(&mut synth, &cc_targets, &mut calibration, controller, value)
                         }
                     },
                     Command::SetParam { module, param, value } => synth.set_param(module, param, value),

@@ -1,4 +1,4 @@
-//! `console`: a ratatui TUI client for a running `engine` process. Connects
+//! `rack`: a ratatui TUI client for a running `engine` process. Connects
 //! over gRPC (see `synth-proto`), renders the engine's controls as a rack of
 //! bordered module panels (one panel per module, grouped by the
 //! `ListControls` response's `module`/`module_name`), each drawn in a style
@@ -19,7 +19,7 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use ratatui::{Frame, Terminal};
 use synth_proto::synth_client::SynthClient;
 use synth_proto::{ControlDescriptor, Empty, NoteOffRequest, NoteOnRequest, SetParamRequest};
-use tracing::{info, warn};
+use tracing::{debug, info, trace, warn};
 use tracing_subscriber::EnvFilter;
 
 /// On-screen "keyboard": each key toggles the given MIDI note on/off (no
@@ -37,11 +37,11 @@ const NOTE_KEYS: &[(char, u8)] = &[
 
 const DEFAULT_ENGINE_ADDR: &str = "http://127.0.0.1:50051";
 /// Default log file name (in the current directory); override with
-/// `CONSOLE_LOG=/path/to/file`. Stdout is unusable for logging while the TUI
+/// `RACK_LOG=/path/to/file`. Stdout is unusable for logging while the TUI
 /// owns the terminal (raw mode + alternate screen), so logs go to a file
-/// instead — `tail -f console.log` in another terminal is the way to watch
+/// instead — `tail -f rack.log` in another terminal is the way to watch
 /// them live.
-const DEFAULT_LOG_FILE: &str = "console.log";
+const DEFAULT_LOG_FILE: &str = "rack.log";
 
 /// Fixed width of every module panel in the rack, borders included.
 const PANEL_WIDTH: u16 = 22;
@@ -141,12 +141,14 @@ impl App {
     fn select_prev(&mut self) {
         if !self.controls.is_empty() {
             self.selected = self.selected.saturating_sub(1);
+            trace!(selected = self.selected, "select_prev");
         }
     }
 
     fn select_next(&mut self) {
         if !self.controls.is_empty() {
             self.selected = (self.selected + 1).min(self.controls.len() - 1);
+            trace!(selected = self.selected, "select_next");
         }
     }
 
@@ -164,6 +166,7 @@ impl App {
         let panel = self.panel_of(self.selected);
         if panel > 0 {
             self.selected = self.panels[panel - 1].control_indices[0];
+            trace!(panel = panel - 1, selected = self.selected, "select_prev_panel");
         }
     }
 
@@ -171,6 +174,7 @@ impl App {
         let panel = self.panel_of(self.selected);
         if panel + 1 < self.panels.len() {
             self.selected = self.panels[panel + 1].control_indices[0];
+            trace!(panel = panel + 1, selected = self.selected, "select_next_panel");
         }
     }
 
@@ -182,6 +186,7 @@ impl App {
         let step = (control.max - control.min) * 0.02;
         let value = &mut self.values[self.selected];
         *value = (*value + direction * step).clamp(control.min, control.max);
+        debug!(name = control.name, value = *value, "adjust_selected");
         Some((control.module, control.param, *value))
     }
 }
@@ -192,7 +197,7 @@ async fn main() -> anyhow::Result<()> {
     // alternate screen) for the whole run, so any stray stdout write would
     // corrupt the display. `_guard` must stay alive for the whole process —
     // dropping it flushes the non-blocking writer.
-    let log_path = std::env::var("CONSOLE_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILE.to_string());
+    let log_path = std::env::var("RACK_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILE.to_string());
     let log_dir = std::path::Path::new(&log_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new("."));
     let log_name = std::path::Path::new(&log_path).file_name().unwrap_or_else(|| std::ffi::OsStr::new(DEFAULT_LOG_FILE));
     let file_appender = tracing_appender::rolling::never(log_dir, log_name);
@@ -203,16 +208,22 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
 
+    info!(version = env!("CARGO_PKG_VERSION"), log_path = %log_path, "starting rack");
+
     let addr = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_ENGINE_ADDR.to_string());
     info!(addr, "connecting to engine");
-    let mut client = SynthClient::connect(addr).await?;
+    let mut client = SynthClient::connect(addr.clone()).await?;
+    info!(addr, "connected to engine");
 
     let controls = client.list_controls(Empty {}).await?.into_inner().controls;
     info!(count = controls.len(), "fetched control list");
     let mut app = App::new(controls);
+    debug!(panels = app.panels.len(), "built rack panels");
 
     let mut state_stream = client.stream_state(Empty {}).await?.into_inner();
+    debug!("subscribed to engine state stream");
 
+    debug!("entering raw mode / alternate screen");
     enable_raw_mode()?;
     std::io::stdout().execute(EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
@@ -235,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
                 maybe_state = state_stream.next(), if !app.state_stream_ended => {
                     match maybe_state {
                         Some(Ok(state)) => {
+                            trace!(active_voices = state.active_voices, output_peak = state.output_peak, "engine state update");
                             app.active_voices = state.active_voices;
                             app.output_peak = state.output_peak;
                         }
@@ -262,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn handle_key(app: &mut App, client: &mut SynthClient<tonic::transport::Channel>, code: KeyCode) {
+    trace!(?code, "key press");
     match code {
         KeyCode::Char('q') | KeyCode::Esc => {
             info!("quit requested");
@@ -276,31 +289,32 @@ async fn handle_key(app: &mut App, client: &mut SynthClient<tonic::transport::Ch
         // -/= (and ,/.): adjust the selected control's value.
         KeyCode::Char('-') | KeyCode::Char(',') => {
             if let Some((module, param, value)) = app.adjust_selected(-1.0) {
-                if let Err(err) = client.set_param(SetParamRequest { module, param, value }).await {
-                    warn!(%err, module, param, value, "set_param failed");
+                match client.set_param(SetParamRequest { module, param, value }).await {
+                    Ok(_) => trace!(module, param, value, "set_param ok"),
+                    Err(err) => warn!(%err, module, param, value, "set_param failed"),
                 }
             }
         }
         KeyCode::Char('=') | KeyCode::Char('.') => {
             if let Some((module, param, value)) = app.adjust_selected(1.0) {
-                if let Err(err) = client.set_param(SetParamRequest { module, param, value }).await {
-                    warn!(%err, module, param, value, "set_param failed");
+                match client.set_param(SetParamRequest { module, param, value }).await {
+                    Ok(_) => trace!(module, param, value, "set_param ok"),
+                    Err(err) => warn!(%err, module, param, value, "set_param failed"),
                 }
             }
         }
         KeyCode::Char(c) => {
             if let Some(&(_, note)) = NOTE_KEYS.iter().find(|(k, _)| *k == c) {
                 if app.held_notes.remove(&note) {
-                    if let Err(err) = client.note_off(NoteOffRequest { note: note as u32 }).await {
-                        warn!(%err, note, "note_off failed");
+                    match client.note_off(NoteOffRequest { note: note as u32 }).await {
+                        Ok(_) => debug!(note, "note_off ok"),
+                        Err(err) => warn!(%err, note, "note_off failed"),
                     }
                 } else {
                     app.held_notes.insert(note);
-                    if let Err(err) = client
-                        .note_on(NoteOnRequest { note: note as u32, velocity: 100 })
-                        .await
-                    {
-                        warn!(%err, note, "note_on failed");
+                    match client.note_on(NoteOnRequest { note: note as u32, velocity: 100 }).await {
+                        Ok(_) => debug!(note, "note_on ok"),
+                        Err(err) => warn!(%err, note, "note_on failed"),
                     }
                 }
             }

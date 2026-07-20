@@ -1,11 +1,11 @@
 [package]
-name = "console"
+name = "rack"
 version.workspace = true
 authors.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "console"
+name = "rack"
 path = "src/main.rs"
 
 [dependencies]

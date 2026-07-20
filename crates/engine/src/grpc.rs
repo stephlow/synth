@@ -9,7 +9,6 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 use std::time::Duration;
 
-use synth::modules::{Attenuverter, Envelope, Lfo, Vca, Vcf, Vco};
 use synth::{Command, EngineMeters, Synth};
 use synth_proto::synth_server::{Synth as SynthRpc, SynthServer};
 use synth_proto::{
@@ -19,145 +18,34 @@ use synth_proto::{
 use tokio::sync::mpsc as tokio_mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{debug, info};
+use tracing::{debug, error, info};
 
-/// Builds the fixed control descriptor table this engine exposes over
-/// gRPC. Mirrors the actual patch graph (`patch::build_default_patch`) one
-/// panel per module — VCO, VCF, VCA, both envelopes, the LFO, and the
-/// attenuverter it modulates the filter through — not a curated CC list, so
-/// a `console` TUI renders the real module rack rather than an invented
-/// subset of "performance knobs". Module indices come from `probe.modules`
-/// (`DefaultPatchModules`), which are data-independent (same every time a
-/// default patch is built), so a throwaway `Synth` is enough to read them
-/// off.
+/// Builds the control descriptor table this engine exposes over gRPC by
+/// translating `Synth::describe_patch()` — the module/param metadata the
+/// running `Patch` produced when it built the graph — into the wire type. No
+/// module list is hand-maintained here: whatever the patch describes itself
+/// as is exactly what the `rack` TUI renders.
 pub fn build_control_descriptors(probe: &Synth) -> Vec<ControlDescriptor> {
-    let m = &probe.modules;
-
-    fn envelope_controls(module: u32, module_name: &str, defaults: [f32; 4]) -> [ControlDescriptor; 4] {
-        [
-            ControlDescriptor {
-                name: "Attack".into(),
-                module,
-                param: Envelope::PARAM_ATTACK as u32,
-                min: 0.001,
-                max: 2.0,
-                default_value: defaults[0],
-                module_name: module_name.into(),
-                module_kind: "envelope".into(),
-            },
-            ControlDescriptor {
-                name: "Decay".into(),
-                module,
-                param: Envelope::PARAM_DECAY as u32,
-                min: 0.001,
-                max: 2.0,
-                default_value: defaults[1],
-                module_name: module_name.into(),
-                module_kind: "envelope".into(),
-            },
-            ControlDescriptor {
-                name: "Sustain".into(),
-                module,
-                param: Envelope::PARAM_SUSTAIN as u32,
-                min: 0.0,
-                max: 1.0,
-                default_value: defaults[2],
-                module_name: module_name.into(),
-                module_kind: "envelope".into(),
-            },
-            ControlDescriptor {
-                name: "Release".into(),
-                module,
-                param: Envelope::PARAM_RELEASE as u32,
-                min: 0.01,
-                max: 5.0,
-                default_value: defaults[3],
-                module_name: module_name.into(),
-                module_kind: "envelope".into(),
-            },
-        ]
-    }
-
-    let mut controls = vec![
-        ControlDescriptor {
-            name: "Tune".into(),
-            module: m.vco as u32,
-            param: Vco::PARAM_TUNE as u32,
-            min: -2.0,
-            max: 2.0,
-            default_value: 0.0,
-            module_name: "VCO".into(),
-            module_kind: "vco".into(),
-        },
-        ControlDescriptor {
-            name: "Cutoff".into(),
-            module: m.vcf as u32,
-            param: Vcf::PARAM_CUTOFF as u32,
-            min: 20.0,
-            max: 10_000.0,
-            default_value: 1200.0,
-            module_name: "VCF".into(),
-            module_kind: "vcf".into(),
-        },
-        ControlDescriptor {
-            name: "Resonance".into(),
-            module: m.vcf as u32,
-            param: Vcf::PARAM_RESONANCE as u32,
-            min: 0.0,
-            max: 1.0,
-            default_value: 0.15,
-            module_name: "VCF".into(),
-            module_kind: "vcf".into(),
-        },
-    ];
-
-    controls.extend(envelope_controls(m.filter_env as u32, "Envelope", [0.05, 0.2, 0.3, 0.4]));
-    controls.extend(envelope_controls(m.amp_env as u32, "Envelope", [0.01, 0.1, 0.7, 0.3]));
-
-    controls.push(ControlDescriptor {
-        name: "Rate".into(),
-        module: m.lfo as u32,
-        param: Lfo::PARAM_RATE as u32,
-        min: 0.1,
-        max: 20.0,
-        default_value: 2.0,
-        module_name: "LFO".into(),
-        module_kind: "lfo".into(),
-    });
-
-    controls.push(ControlDescriptor {
-        name: "Scale".into(),
-        module: m.lfo_depth as u32,
-        param: Attenuverter::PARAM_SCALE as u32,
-        min: 0.0,
-        max: 2.0,
-        default_value: 0.2,
-        module_name: "Attenuverter".into(),
-        module_kind: "attenuverter".into(),
-    });
-    controls.push(ControlDescriptor {
-        name: "Offset".into(),
-        module: m.lfo_depth as u32,
-        param: Attenuverter::PARAM_OFFSET as u32,
-        min: -1.0,
-        max: 1.0,
-        default_value: 0.0,
-        module_name: "Attenuverter".into(),
-        module_kind: "attenuverter".into(),
-    });
-
-    controls.push(ControlDescriptor {
-        name: "Level".into(),
-        module: m.vca as u32,
-        param: Vca::PARAM_LEVEL as u32,
-        min: 0.0,
-        max: 1.5,
-        default_value: 1.0,
-        module_name: "VCA".into(),
-        module_kind: "vca".into(),
-    });
-
-    controls
+    let modules = probe.describe_patch();
+    debug!(module_count = modules.len(), "describing patch for control descriptors");
+    let descriptors: Vec<ControlDescriptor> = modules
+        .iter()
+        .flat_map(|module_info| {
+            debug!(module = module_info.module, name = module_info.name, kind = module_info.kind, param_count = module_info.params.len(), "module described");
+            module_info.params.iter().map(move |param_info| ControlDescriptor {
+                name: param_info.name.into(),
+                module: module_info.module as u32,
+                param: param_info.param as u32,
+                min: param_info.min,
+                max: param_info.max,
+                default_value: param_info.default_value,
+                module_name: module_info.name.into(),
+                module_kind: module_info.kind.into(),
+            })
+        })
+        .collect();
+    info!(count = descriptors.len(), "built control descriptor table");
+    descriptors
 }
 
 pub struct SynthService {
@@ -168,9 +56,10 @@ pub struct SynthService {
 
 impl SynthService {
     fn send(&self, command: Command) -> Result<(), Status> {
-        self.tx
-            .send(command)
-            .map_err(|_| Status::internal("audio thread is no longer running"))
+        self.tx.send(command).map_err(|_| {
+            error!("failed to send command: audio thread is no longer running");
+            Status::internal("audio thread is no longer running")
+        })
     }
 }
 
@@ -192,6 +81,7 @@ impl SynthRpc for SynthService {
         request: Request<CalibrationRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
+        debug!(channel = req.channel, scale = req.scale, offset = req.offset, "set_output_calibration");
         self.send(Command::SetOutputCalibration {
             channel: req.channel as usize,
             scale: req.scale,
@@ -266,9 +156,15 @@ pub async fn serve(
     descriptors: Vec<ControlDescriptor>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let service = SynthService { tx, meters, descriptors };
-    Server::builder()
+    debug!(addr, "starting gRPC server");
+    let result = Server::builder()
         .add_service(SynthServer::new(service))
         .serve(addr.parse()?)
-        .await?;
+        .await;
+    match &result {
+        Ok(()) => info!("gRPC server stopped"),
+        Err(err) => error!(%err, "gRPC server exited with an error"),
+    }
+    result?;
     Ok(())
 }
