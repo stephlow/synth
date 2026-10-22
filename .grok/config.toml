@@ -1,0 +1,4 @@
+[mcp_servers.synth]
+command = "/home/steph/repositories/synth/target/debug/mcp"
+args = ["http://127.0.0.1:50051"]
+enabled = true

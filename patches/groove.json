@@ -1,0 +1,899 @@
+{
+  "version": 1,
+  "next_id": 25,
+  "next_cable_id": 29,
+  "modules": [
+    {
+      "id": 0,
+      "kind": "midi_to_cv",
+      "name": "MIDI to CV",
+      "params": [],
+      "coordinates": {
+        "x": 0,
+        "y": 3
+      }
+    },
+    {
+      "id": 1,
+      "kind": "lfo",
+      "name": "Clock",
+      "params": [
+        [
+          0,
+          4.0
+        ]
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 2,
+      "kind": "lfo",
+      "name": "Snare Clock",
+      "params": [
+        [
+          0,
+          2.0
+        ]
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 1
+      }
+    },
+    {
+      "id": 6,
+      "kind": "sequencer",
+      "name": "Bass Seq",
+      "params": [
+        [
+          0,
+          16.0
+        ],
+        [
+          1,
+          0.4
+        ],
+        [
+          2,
+          -1.0
+        ],
+        [
+          3,
+          -1.0
+        ],
+        [
+          4,
+          -0.8333333
+        ],
+        [
+          5,
+          -0.5833333
+        ],
+        [
+          6,
+          -1.0
+        ],
+        [
+          7,
+          -1.0
+        ],
+        [
+          8,
+          -0.8333333
+        ],
+        [
+          9,
+          -0.5833333
+        ],
+        [
+          10,
+          -0.8333333
+        ],
+        [
+          11,
+          -0.6666667
+        ],
+        [
+          12,
+          -0.5833333
+        ],
+        [
+          13,
+          -0.41666666
+        ],
+        [
+          14,
+          -0.25
+        ],
+        [
+          15,
+          -0.41666666
+        ],
+        [
+          16,
+          -0.5833333
+        ],
+        [
+          17,
+          -1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 0
+      }
+    },
+    {
+      "id": 7,
+      "kind": "quantizer",
+      "name": "Bass Quant",
+      "params": [
+        [
+          0,
+          11.0
+        ],
+        [
+          1,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 0
+      }
+    },
+    {
+      "id": 8,
+      "kind": "vco",
+      "name": "Bass VCO",
+      "params": [
+        [
+          0,
+          -1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 0
+      }
+    },
+    {
+      "id": 9,
+      "kind": "vcf",
+      "name": "Bass VCF",
+      "params": [
+        [
+          0,
+          480.0
+        ],
+        [
+          1,
+          0.35
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 0
+      }
+    },
+    {
+      "id": 10,
+      "kind": "envelope",
+      "name": "Bass Env",
+      "params": [
+        [
+          0,
+          0.002
+        ],
+        [
+          1,
+          0.18
+        ],
+        [
+          2,
+          0.15
+        ],
+        [
+          3,
+          0.08
+        ]
+      ],
+      "coordinates": {
+        "x": 5,
+        "y": 0
+      }
+    },
+    {
+      "id": 11,
+      "kind": "vca",
+      "name": "Bass VCA",
+      "params": [
+        [
+          0,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 0
+      }
+    },
+    {
+      "id": 12,
+      "kind": "sequencer",
+      "name": "Kick Seq",
+      "params": [
+        [
+          0,
+          4.0
+        ],
+        [
+          1,
+          0.12
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          3,
+          0.0
+        ],
+        [
+          4,
+          0.0
+        ],
+        [
+          5,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 1
+      }
+    },
+    {
+      "id": 13,
+      "kind": "vco",
+      "name": "Kick VCO",
+      "params": [
+        [
+          0,
+          -3.0
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 1
+      }
+    },
+    {
+      "id": 14,
+      "kind": "envelope",
+      "name": "Kick Env",
+      "params": [
+        [
+          0,
+          0.001
+        ],
+        [
+          1,
+          0.22
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          3,
+          0.08
+        ]
+      ],
+      "coordinates": {
+        "x": 5,
+        "y": 1
+      }
+    },
+    {
+      "id": 15,
+      "kind": "vca",
+      "name": "Kick VCA",
+      "params": [
+        [
+          0,
+          1.1
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 1
+      }
+    },
+    {
+      "id": 16,
+      "kind": "sequencer",
+      "name": "Snare Seq",
+      "params": [
+        [
+          0,
+          2.0
+        ],
+        [
+          1,
+          0.1
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          3,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 2
+      }
+    },
+    {
+      "id": 17,
+      "kind": "noise",
+      "name": "Snare Noise",
+      "params": [],
+      "coordinates": {
+        "x": 3,
+        "y": 2
+      }
+    },
+    {
+      "id": 18,
+      "kind": "envelope",
+      "name": "Snare Env",
+      "params": [
+        [
+          0,
+          0.001
+        ],
+        [
+          1,
+          0.12
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          3,
+          0.06
+        ]
+      ],
+      "coordinates": {
+        "x": 5,
+        "y": 2
+      }
+    },
+    {
+      "id": 19,
+      "kind": "vca",
+      "name": "Snare VCA",
+      "params": [
+        [
+          0,
+          0.85
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 2
+      }
+    },
+    {
+      "id": 20,
+      "kind": "vco",
+      "name": "Lead VCO",
+      "params": [
+        [
+          0,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 3
+      }
+    },
+    {
+      "id": 21,
+      "kind": "vcf",
+      "name": "Lead VCF",
+      "params": [
+        [
+          0,
+          1800.0
+        ],
+        [
+          1,
+          0.22
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 3
+      }
+    },
+    {
+      "id": 22,
+      "kind": "envelope",
+      "name": "Lead Amp",
+      "params": [
+        [
+          0,
+          0.01
+        ],
+        [
+          1,
+          0.15
+        ],
+        [
+          2,
+          0.65
+        ],
+        [
+          3,
+          0.25
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 3
+      }
+    },
+    {
+      "id": 23,
+      "kind": "envelope",
+      "name": "Lead Filt",
+      "params": [
+        [
+          0,
+          0.02
+        ],
+        [
+          1,
+          0.25
+        ],
+        [
+          2,
+          0.3
+        ],
+        [
+          3,
+          0.3
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 3
+      }
+    },
+    {
+      "id": 24,
+      "kind": "vca",
+      "name": "Lead VCA",
+      "params": [
+        [
+          0,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 5,
+        "y": 3
+      }
+    },
+    {
+      "id": 3,
+      "kind": "mixer",
+      "name": "Mix",
+      "params": [
+        [
+          0,
+          0.45
+        ],
+        [
+          1,
+          0.55
+        ],
+        [
+          2,
+          0.4
+        ],
+        [
+          3,
+          2.0
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 3
+      }
+    },
+    {
+      "id": 4,
+      "kind": "oscilloscope",
+      "name": "Scope",
+      "params": [],
+      "coordinates": {
+        "x": 7,
+        "y": 3
+      }
+    },
+    {
+      "id": 5,
+      "kind": "io",
+      "name": "Audio In",
+      "params": [
+        [
+          2,
+          1.0
+        ],
+        [
+          3,
+          0.0
+        ],
+        [
+          6,
+          1.0
+        ],
+        [
+          7,
+          0.0
+        ]
+      ],
+      "io_send_channels": 0,
+      "io_capture_channels": 2,
+      "coordinates": {
+        "x": 0,
+        "y": 4
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 0,
+      "src_module": 1,
+      "src_port": 0,
+      "dst_module": 6,
+      "dst_port": 0
+    },
+    {
+      "id": 1,
+      "src_module": 6,
+      "src_port": 0,
+      "dst_module": 7,
+      "dst_port": 0
+    },
+    {
+      "id": 2,
+      "src_module": 7,
+      "src_port": 0,
+      "dst_module": 8,
+      "dst_port": 0
+    },
+    {
+      "id": 3,
+      "src_module": 8,
+      "src_port": 1,
+      "dst_module": 9,
+      "dst_port": 0
+    },
+    {
+      "id": 4,
+      "src_module": 10,
+      "src_port": 0,
+      "dst_module": 9,
+      "dst_port": 1
+    },
+    {
+      "id": 5,
+      "src_module": 9,
+      "src_port": 0,
+      "dst_module": 11,
+      "dst_port": 0
+    },
+    {
+      "id": 6,
+      "src_module": 10,
+      "src_port": 0,
+      "dst_module": 11,
+      "dst_port": 1
+    },
+    {
+      "id": 7,
+      "src_module": 6,
+      "src_port": 1,
+      "dst_module": 10,
+      "dst_port": 0
+    },
+    {
+      "id": 8,
+      "src_module": 1,
+      "src_port": 0,
+      "dst_module": 12,
+      "dst_port": 0
+    },
+    {
+      "id": 9,
+      "src_module": 13,
+      "src_port": 0,
+      "dst_module": 15,
+      "dst_port": 0
+    },
+    {
+      "id": 10,
+      "src_module": 14,
+      "src_port": 0,
+      "dst_module": 13,
+      "dst_port": 0
+    },
+    {
+      "id": 11,
+      "src_module": 14,
+      "src_port": 0,
+      "dst_module": 15,
+      "dst_port": 1
+    },
+    {
+      "id": 12,
+      "src_module": 12,
+      "src_port": 1,
+      "dst_module": 14,
+      "dst_port": 0
+    },
+    {
+      "id": 13,
+      "src_module": 2,
+      "src_port": 0,
+      "dst_module": 16,
+      "dst_port": 0
+    },
+    {
+      "id": 14,
+      "src_module": 17,
+      "src_port": 0,
+      "dst_module": 19,
+      "dst_port": 0
+    },
+    {
+      "id": 15,
+      "src_module": 18,
+      "src_port": 0,
+      "dst_module": 19,
+      "dst_port": 1
+    },
+    {
+      "id": 16,
+      "src_module": 16,
+      "src_port": 1,
+      "dst_module": 18,
+      "dst_port": 0
+    },
+    {
+      "id": 17,
+      "src_module": 0,
+      "src_port": 0,
+      "dst_module": 20,
+      "dst_port": 0
+    },
+    {
+      "id": 18,
+      "src_module": 20,
+      "src_port": 2,
+      "dst_module": 21,
+      "dst_port": 0
+    },
+    {
+      "id": 19,
+      "src_module": 23,
+      "src_port": 0,
+      "dst_module": 21,
+      "dst_port": 1
+    },
+    {
+      "id": 20,
+      "src_module": 21,
+      "src_port": 0,
+      "dst_module": 24,
+      "dst_port": 0
+    },
+    {
+      "id": 21,
+      "src_module": 22,
+      "src_port": 0,
+      "dst_module": 24,
+      "dst_port": 1
+    },
+    {
+      "id": 22,
+      "src_module": 0,
+      "src_port": 1,
+      "dst_module": 22,
+      "dst_port": 0
+    },
+    {
+      "id": 23,
+      "src_module": 0,
+      "src_port": 1,
+      "dst_module": 23,
+      "dst_port": 0
+    },
+    {
+      "id": 24,
+      "src_module": 11,
+      "src_port": 0,
+      "dst_module": 3,
+      "dst_port": 0
+    },
+    {
+      "id": 25,
+      "src_module": 15,
+      "src_port": 0,
+      "dst_module": 3,
+      "dst_port": 1
+    },
+    {
+      "id": 26,
+      "src_module": 19,
+      "src_port": 0,
+      "dst_module": 3,
+      "dst_port": 2
+    },
+    {
+      "id": 27,
+      "src_module": 24,
+      "src_port": 0,
+      "dst_module": 3,
+      "dst_port": 3
+    },
+    {
+      "id": 28,
+      "src_module": 3,
+      "src_port": 0,
+      "dst_module": 4,
+      "dst_port": 0
+    }
+  ],
+  "roles": {
+    "note_source": 0,
+    "activity_gate": 22,
+    "external_input": 5,
+    "output_tap_module": 4,
+    "output_tap_port": 0
+  },
+  "io_endpoints": [
+    {
+      "id": "audio_out",
+      "name": "Audio Out",
+      "kind": "io",
+      "direction": "output",
+      "channels": 4,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": null,
+      "params": [
+        {
+          "name": "Audio L Scale",
+          "param": 0,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio L Offset",
+          "param": 1,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Audio R Scale",
+          "param": 4,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio R Offset",
+          "param": 5,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Pitch Scale",
+          "param": 8,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Pitch Offset",
+          "param": 9,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Gate Scale",
+          "param": 12,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Gate Offset",
+          "param": 13,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 5
+      }
+    },
+    {
+      "id": "audio_in",
+      "name": "Audio In",
+      "kind": "io",
+      "direction": "input",
+      "channels": 2,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": 5,
+      "params": [
+        {
+          "name": "Ch1 Scale",
+          "param": 2,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch1 Offset",
+          "param": 3,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Ch2 Scale",
+          "param": 6,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch2 Offset",
+          "param": 7,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 4
+      }
+    }
+  ],
+  "canvas": {
+    "width": 16,
+    "height": 10
+  }
+}

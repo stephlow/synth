@@ -1,0 +1,741 @@
+{
+  "version": 1,
+  "next_id": 25,
+  "next_cable_id": 20,
+  "modules": [
+    {
+      "id": 0,
+      "kind": "midi_to_cv",
+      "name": "MIDI to CV",
+      "params": [],
+      "coordinates": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 1,
+      "kind": "io",
+      "name": "Audio In",
+      "params": [
+        [
+          2,
+          1.0
+        ],
+        [
+          3,
+          0.0
+        ],
+        [
+          6,
+          1.0
+        ],
+        [
+          7,
+          0.0
+        ]
+      ],
+      "io_send_channels": 0,
+      "io_capture_channels": 2,
+      "coordinates": {
+        "x": 0,
+        "y": 1
+      }
+    },
+    {
+      "id": 2,
+      "kind": "oscilloscope",
+      "name": "Scope",
+      "params": [
+        [
+          0,
+          1.2207031
+        ],
+        [
+          1,
+          20.0
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 0
+      }
+    },
+    {
+      "id": 3,
+      "kind": "vco",
+      "name": "VCO",
+      "params": [
+        [
+          0,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 1
+      }
+    },
+    {
+      "id": 4,
+      "kind": "oscilloscope",
+      "name": "Scope",
+      "params": [
+        [
+          0,
+          2.5
+        ],
+        [
+          1,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 1
+      }
+    },
+    {
+      "id": 5,
+      "kind": "oscilloscope",
+      "name": "Scope",
+      "params": [
+        [
+          0,
+          2.5
+        ],
+        [
+          1,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 2
+      }
+    },
+    {
+      "id": 6,
+      "kind": "oscilloscope",
+      "name": "Scope",
+      "params": [
+        [
+          0,
+          2.5
+        ],
+        [
+          1,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 2,
+        "y": 3
+      }
+    },
+    {
+      "id": 9,
+      "kind": "euclidean",
+      "name": "Euclidean",
+      "params": [
+        [
+          0,
+          16.0
+        ],
+        [
+          1,
+          4.0
+        ],
+        [
+          2,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 0
+      }
+    },
+    {
+      "id": 11,
+      "kind": "lfo",
+      "name": "LFO",
+      "params": [
+        [
+          0,
+          1.095
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 0
+      }
+    },
+    {
+      "id": 12,
+      "kind": "sequencer",
+      "name": "Sequencer",
+      "params": [
+        [
+          0,
+          8.0
+        ],
+        [
+          1,
+          0.5
+        ],
+        [
+          2,
+          0.0
+        ],
+        [
+          3,
+          0.16666667
+        ],
+        [
+          4,
+          0.33333334
+        ],
+        [
+          5,
+          0.41666666
+        ],
+        [
+          6,
+          0.5833333
+        ],
+        [
+          7,
+          0.75
+        ],
+        [
+          8,
+          0.9166667
+        ],
+        [
+          9,
+          1.0
+        ],
+        [
+          10,
+          0.0
+        ],
+        [
+          11,
+          0.0
+        ],
+        [
+          12,
+          0.0
+        ],
+        [
+          13,
+          0.0
+        ],
+        [
+          14,
+          0.0
+        ],
+        [
+          15,
+          0.0
+        ],
+        [
+          16,
+          0.0
+        ],
+        [
+          17,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 1
+      }
+    },
+    {
+      "id": 13,
+      "kind": "quantizer",
+      "name": "Quantizer",
+      "params": [
+        [
+          0,
+          1.0
+        ],
+        [
+          1,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 1
+      }
+    },
+    {
+      "id": 14,
+      "kind": "mixer",
+      "name": "Mixer",
+      "params": [
+        [
+          0,
+          1.0
+        ],
+        [
+          1,
+          1.0
+        ],
+        [
+          2,
+          1.0
+        ],
+        [
+          3,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 2
+      }
+    },
+    {
+      "id": 15,
+      "kind": "wavefolder",
+      "name": "Wavefolder",
+      "params": [
+        [
+          0,
+          1.5
+        ],
+        [
+          1,
+          0.0
+        ],
+        [
+          2,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 2
+      }
+    },
+    {
+      "id": 16,
+      "kind": "vco",
+      "name": "VCO",
+      "params": [
+        [
+          0,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 1,
+        "y": 2
+      }
+    },
+    {
+      "id": 17,
+      "kind": "attenuverter",
+      "name": "Attenuverter",
+      "params": [
+        [
+          0,
+          1.0
+        ],
+        [
+          1,
+          -1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 5,
+        "y": 1
+      }
+    },
+    {
+      "id": 18,
+      "kind": "quantizer",
+      "name": "Quantizer",
+      "params": [
+        [
+          0,
+          1.0
+        ],
+        [
+          1,
+          0.0
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 1
+      }
+    },
+    {
+      "id": 19,
+      "kind": "noise",
+      "name": "Noise",
+      "params": [],
+      "coordinates": {
+        "x": 5,
+        "y": 2
+      }
+    },
+    {
+      "id": 20,
+      "kind": "attenuverter",
+      "name": "Attenuverter",
+      "params": [
+        [
+          0,
+          -1.0
+        ],
+        [
+          1,
+          0.10000002
+        ]
+      ],
+      "coordinates": {
+        "x": 6,
+        "y": 2
+      }
+    },
+    {
+      "id": 21,
+      "kind": "vcf",
+      "name": "VCF",
+      "params": [
+        [
+          0,
+          1000.0
+        ],
+        [
+          1,
+          0.2
+        ]
+      ],
+      "coordinates": {
+        "x": 3,
+        "y": 3
+      }
+    },
+    {
+      "id": 22,
+      "kind": "envelope",
+      "name": "Envelope",
+      "params": [
+        [
+          0,
+          0.01
+        ],
+        [
+          1,
+          0.1
+        ],
+        [
+          2,
+          0.7
+        ],
+        [
+          3,
+          0.3
+        ]
+      ],
+      "coordinates": {
+        "x": 4,
+        "y": 3
+      }
+    },
+    {
+      "id": 23,
+      "kind": "vca",
+      "name": "VCA",
+      "params": [
+        [
+          0,
+          1.0
+        ]
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 3
+      }
+    }
+  ],
+  "cables": [
+    {
+      "id": 0,
+      "src_module": 3,
+      "src_port": 1,
+      "dst_module": 2,
+      "dst_port": 0
+    },
+    {
+      "id": 1,
+      "src_module": 3,
+      "src_port": 0,
+      "dst_module": 4,
+      "dst_port": 0
+    },
+    {
+      "id": 2,
+      "src_module": 3,
+      "src_port": 2,
+      "dst_module": 5,
+      "dst_port": 0
+    },
+    {
+      "id": 3,
+      "src_module": 3,
+      "src_port": 3,
+      "dst_module": 6,
+      "dst_port": 0
+    },
+    {
+      "id": 4,
+      "src_module": 11,
+      "src_port": 2,
+      "dst_module": 9,
+      "dst_port": 0
+    },
+    {
+      "id": 5,
+      "src_module": 9,
+      "src_port": 0,
+      "dst_module": 12,
+      "dst_port": 0
+    },
+    {
+      "id": 6,
+      "src_module": 12,
+      "src_port": 0,
+      "dst_module": 13,
+      "dst_port": 0
+    },
+    {
+      "id": 7,
+      "src_module": 13,
+      "src_port": 0,
+      "dst_module": 3,
+      "dst_port": 0
+    },
+    {
+      "id": 8,
+      "src_module": 3,
+      "src_port": 1,
+      "dst_module": 14,
+      "dst_port": 0
+    },
+    {
+      "id": 9,
+      "src_module": 12,
+      "src_port": 0,
+      "dst_module": 17,
+      "dst_port": 0
+    },
+    {
+      "id": 10,
+      "src_module": 17,
+      "src_port": 0,
+      "dst_module": 18,
+      "dst_port": 0
+    },
+    {
+      "id": 11,
+      "src_module": 18,
+      "src_port": 0,
+      "dst_module": 16,
+      "dst_port": 0
+    },
+    {
+      "id": 12,
+      "src_module": 16,
+      "src_port": 1,
+      "dst_module": 14,
+      "dst_port": 1
+    },
+    {
+      "id": 13,
+      "src_module": 14,
+      "src_port": 0,
+      "dst_module": 15,
+      "dst_port": 0
+    },
+    {
+      "id": 14,
+      "src_module": 19,
+      "src_port": 1,
+      "dst_module": 20,
+      "dst_port": 0
+    },
+    {
+      "id": 15,
+      "src_module": 20,
+      "src_port": 0,
+      "dst_module": 15,
+      "dst_port": 1
+    },
+    {
+      "id": 16,
+      "src_module": 15,
+      "src_port": 0,
+      "dst_module": 21,
+      "dst_port": 0
+    },
+    {
+      "id": 17,
+      "src_module": 22,
+      "src_port": 0,
+      "dst_module": 21,
+      "dst_port": 1
+    },
+    {
+      "id": 18,
+      "src_module": 12,
+      "src_port": 1,
+      "dst_module": 22,
+      "dst_port": 0
+    },
+    {
+      "id": 19,
+      "src_module": 21,
+      "src_port": 0,
+      "dst_module": 23,
+      "dst_port": 0
+    }
+  ],
+  "roles": {
+    "note_source": 0,
+    "activity_gate": 0,
+    "external_input": 1,
+    "output_tap_module": 23,
+    "output_tap_port": 0
+  },
+  "io_endpoints": [
+    {
+      "id": "audio_out",
+      "name": "Audio Out",
+      "kind": "io",
+      "direction": "output",
+      "channels": 4,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": null,
+      "params": [
+        {
+          "name": "Audio L Scale",
+          "param": 0,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio L Offset",
+          "param": 1,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Audio R Scale",
+          "param": 4,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio R Offset",
+          "param": 5,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Pitch Scale",
+          "param": 8,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Pitch Offset",
+          "param": 9,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Gate Scale",
+          "param": 12,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Gate Offset",
+          "param": 13,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 2
+      }
+    },
+    {
+      "id": "audio_in",
+      "name": "Audio In",
+      "kind": "io",
+      "direction": "input",
+      "channels": 2,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": 1,
+      "params": [
+        {
+          "name": "Ch1 Scale",
+          "param": 2,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch1 Offset",
+          "param": 3,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Ch2 Scale",
+          "param": 6,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch2 Offset",
+          "param": 7,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 1
+      }
+    }
+  ],
+  "canvas": {
+    "width": 32,
+    "height": 20
+  }
+}

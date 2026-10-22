@@ -1,0 +1,176 @@
+{
+  "version": 1,
+  "next_id": 2,
+  "next_cable_id": 0,
+  "modules": [
+    {
+      "id": 0,
+      "kind": "midi_to_cv",
+      "name": "MIDI to CV",
+      "params": [],
+      "coordinates": {
+        "x": 0,
+        "y": 0
+      }
+    },
+    {
+      "id": 1,
+      "kind": "io",
+      "name": "Audio In",
+      "params": [
+        [
+          2,
+          1.0
+        ],
+        [
+          3,
+          0.0
+        ],
+        [
+          6,
+          1.0
+        ],
+        [
+          7,
+          0.0
+        ]
+      ],
+      "io_send_channels": 0,
+      "io_capture_channels": 2,
+      "coordinates": {
+        "x": 0,
+        "y": 1
+      }
+    }
+  ],
+  "cables": [],
+  "roles": {
+    "note_source": 0,
+    "activity_gate": 0,
+    "external_input": 1,
+    "output_tap_module": 1,
+    "output_tap_port": 0
+  },
+  "io_endpoints": [
+    {
+      "id": "audio_out",
+      "name": "Audio Out",
+      "kind": "io",
+      "direction": "output",
+      "channels": 4,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": null,
+      "params": [
+        {
+          "name": "Audio L Scale",
+          "param": 0,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio L Offset",
+          "param": 1,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Audio R Scale",
+          "param": 4,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Audio R Offset",
+          "param": 5,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Pitch Scale",
+          "param": 8,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Pitch Offset",
+          "param": 9,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Gate Scale",
+          "param": 12,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Gate Offset",
+          "param": 13,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 2
+      }
+    },
+    {
+      "id": "audio_in",
+      "name": "Audio In",
+      "kind": "io",
+      "direction": "input",
+      "channels": 2,
+      "device": "default",
+      "device_channel_offset": 0,
+      "module": 1,
+      "params": [
+        {
+          "name": "Ch1 Scale",
+          "param": 2,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch1 Offset",
+          "param": 3,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        },
+        {
+          "name": "Ch2 Scale",
+          "param": 6,
+          "min": 0.0,
+          "max": 2.0,
+          "default_value": 1.0
+        },
+        {
+          "name": "Ch2 Offset",
+          "param": 7,
+          "min": -1.0,
+          "max": 1.0,
+          "default_value": 0.0
+        }
+      ],
+      "coordinates": {
+        "x": 0,
+        "y": 1
+      }
+    }
+  ],
+  "canvas": {
+    "width": 8,
+    "height": 6
+  }
+}

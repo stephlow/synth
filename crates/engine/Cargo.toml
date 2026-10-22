@@ -1,0 +1,23 @@
+[package]
+name = "engine"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[dependencies]
+dsp = { path = "../dsp" }
+synth-proto = { path = "../proto" }
+anyhow = "1.0.86"
+cpal = "0.15.3"
+rtrb = "0.3.1"
+wmidi = "4.0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-stream = "0.1"
+futures-core = "0.3"
+tonic = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

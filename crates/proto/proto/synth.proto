@@ -1,0 +1,319 @@
+syntax = "proto3";
+
+package synth;
+
+// Control surface + live metering for a running `engine` process. See
+// `engine`'s SynthService impl for the server side and `rack` for the
+// TUI client.
+service Synth {
+  // Change a single module parameter (e.g. filter cutoff).
+  rpc SetParam(SetParamRequest) returns (Empty);
+
+  // Calibrate a hardware output channel (scale/offset), see
+  // dsp::Synth::set_output_calibration.
+  rpc SetOutputCalibration(CalibrationRequest) returns (Empty);
+
+  // Play/stop a note without needing MIDI hardware attached to the engine.
+  rpc NoteOn(NoteOnRequest) returns (Empty);
+  rpc NoteOff(NoteOffRequest) returns (Empty);
+
+  // The controls this engine exposes (module ids are stable patch ids).
+  rpc ListControls(Empty) returns (ControlList);
+
+  // Patch-owned hardware IO endpoints (device bindings + channel layout).
+  rpc ListIoEndpoints(Empty) returns (IoEndpointList);
+
+  // Enumerate host audio devices for IO device pickers.
+  rpc ListAudioDevices(Empty) returns (AudioDeviceList);
+
+  // Change which device a patch IO endpoint is bound to (runtime).
+  rpc SetIoDevice(SetIoDeviceRequest) returns (Empty);
+
+  // Live engine state (active voices, output level, IO meters), pushed
+  // periodically.
+  rpc StreamState(Empty) returns (stream EngineState);
+
+  // --- Dynamic patch topology (rebuilds voices off the audio path) ---
+
+  // Module kinds available to add (palette).
+  rpc ListModuleTypes(Empty) returns (ModuleTypeList);
+
+  // Full patch snapshot (modules, cables, roles, JSON).
+  rpc GetPatch(Empty) returns (PatchSnapshot);
+
+  rpc AddModule(AddModuleRequest) returns (PatchSnapshot);
+  rpc RemoveModule(RemoveModuleRequest) returns (PatchSnapshot);
+  // Named PatchConnect/PatchDisconnect so generated clients do not clash
+  // with tonic's transport `connect`.
+  rpc PatchConnect(ConnectRequest) returns (PatchSnapshot);
+  rpc PatchDisconnect(DisconnectRequest) returns (PatchSnapshot);
+
+  // Load/save the patch document as JSON (same format as GetPatch.document_json).
+  // File paths are a control-surface concern; these RPCs only move JSON.
+  rpc LoadPatch(LoadPatchRequest) returns (PatchSnapshot);
+  rpc SavePatch(Empty) returns (SavePatchResponse);
+  // Reset the engine to the built-in default patch (fresh document + rebuild).
+  rpc NewPatch(Empty) returns (PatchSnapshot);
+
+  // Control-surface lattice layout (ignored by DSP).
+  rpc SetModuleCoordinates(SetModuleCoordinatesRequest) returns (PatchSnapshot);
+  rpc SetCoordinates(SetCoordinatesRequest) returns (PatchSnapshot);
+
+  // Point the voice main-bus tap at a module output (what feeds Audio Out L/R).
+  rpc SetOutputTap(SetOutputTapRequest) returns (PatchSnapshot);
+}
+
+message Empty {}
+
+message SetParamRequest {
+  uint32 module = 1;
+  uint32 param = 2;
+  float value = 3;
+}
+
+message CalibrationRequest {
+  uint32 channel = 1;
+  float scale = 2;
+  float offset = 3;
+}
+
+message NoteOnRequest {
+  uint32 note = 1;     // MIDI note number, 0..127
+  uint32 velocity = 2; // MIDI velocity, 1..127
+}
+
+message NoteOffRequest {
+  uint32 note = 1;
+}
+
+// A single control the engine exposes, e.g. "Filter Cutoff" -> module 5,
+// param 0, range 20..10000, default 1200.
+message ControlDescriptor {
+  string name = 1;
+  // Stable patch module id (not a dense graph index).
+  uint32 module = 2;
+  uint32 param = 3;
+  float min = 4;
+  float max = 5;
+  float default_value = 6;
+  // Display name of the module this control belongs to (e.g. "Filter"),
+  // shared by every control on the same module index — a client groups
+  // controls into one panel per distinct module_name/module.
+  string module_name = 7;
+  // Module type key (e.g. "vcf", "lfo", "envelope", "attenuverter"), so a
+  // client can pick a fitting control style per module kind without
+  // hardcoding module indices.
+  string module_kind = 8;
+}
+
+message ControlList {
+  repeated ControlDescriptor controls = 1;
+}
+
+message IoEndpointDescriptor {
+  string id = 1;
+  string name = 2;
+  // "input" or "output"
+  string direction = 3;
+  uint32 channels = 4;
+  // Patch-owned device binding ("default" or a cpal device name).
+  string device_name = 5;
+  // Lattice position for control surfaces (always set by the engine).
+  ModuleCoordinates coordinates = 6;
+}
+
+message IoEndpointList {
+  repeated IoEndpointDescriptor endpoints = 1;
+}
+
+message AudioDevice {
+  string name = 1;
+  bool is_input = 2;
+  bool is_output = 3;
+  uint32 max_input_channels = 4;
+  uint32 max_output_channels = 5;
+}
+
+message AudioDeviceList {
+  repeated AudioDevice devices = 1;
+}
+
+message SetIoDeviceRequest {
+  // Patch endpoint id, e.g. "audio_in" / "audio_out".
+  string endpoint_id = 1;
+  // cpal device name, or empty / "default" for host default.
+  string device_name = 2;
+}
+
+message IoChannelMeter {
+  string endpoint_id = 1;
+  repeated float peak = 2;
+  string device_name = 3;
+  bool connected = 4;
+}
+
+// Live signal for one voice-graph module (peak + short waveform).
+message ModuleSignal {
+  uint32 module_id = 1;
+  float peak = 2;
+  // Decimated recent block for tile glyphs (typically ~128 samples).
+  repeated float waveform = 3;
+}
+
+// Live peak for one patch cable (source port absolute peak).
+message CableSignal {
+  uint32 cable_id = 1;
+  float peak = 2;
+}
+
+message EngineState {
+  uint32 active_voices = 1;
+  float output_peak = 2;
+  // Most recent block of the mixed audio output (one sample per entry),
+  // for a live oscilloscope view. Length is the block size of the last
+  // rendered block (<= MAX_BLOCK_FRAMES), and it may be empty when no
+  // audio has been rendered yet.
+  repeated float waveform = 3;
+  // Per-endpoint live meters + resolved device status.
+  repeated IoChannelMeter io_meters = 4;
+  // Monotonic topology revision. Bumped when the patch document changes
+  // (add/remove/connect/disconnect/load). Control surfaces should
+  // re-fetch `GetPatch` when this differs from their last snapshot.
+  uint64 patch_generation = 5;
+  // Per-module live signals for lattice tiles.
+  repeated ModuleSignal module_signals = 6;
+  // Per-cable live peaks for wire intensity.
+  repeated CableSignal cable_signals = 7;
+}
+
+message PortDescriptor {
+  string name = 1;
+  uint32 index = 2;
+}
+
+message ParamTypeDescriptor {
+  string name = 1;
+  uint32 index = 2;
+  float min = 3;
+  float max = 4;
+  float default_value = 5;
+  // When non-empty, the param is discrete: rounded value indexes into this list
+  // (e.g. quantizer scale names). Continuous knobs leave this empty.
+  repeated string choices = 6;
+}
+
+message ModuleType {
+  string kind = 1;
+  string display_name = 2;
+  repeated PortDescriptor inputs = 3;
+  repeated PortDescriptor outputs = 4;
+  repeated ParamTypeDescriptor params = 5;
+}
+
+message ModuleTypeList {
+  repeated ModuleType types = 1;
+}
+
+message ModuleCoordinates {
+  uint32 x = 1;
+  uint32 y = 2;
+}
+
+message PatchCanvas {
+  uint32 width = 1;
+  uint32 height = 2;
+}
+
+message ModuleInstanceDescriptor {
+  uint32 id = 1;
+  string kind = 2;
+  string name = 3;
+  // Lattice position (always set by the engine; clients may move via SetCoordinates).
+  ModuleCoordinates coordinates = 4;
+}
+
+message CableDescriptor {
+  uint32 id = 1;
+  uint32 src_module = 2;
+  uint32 src_port = 3;
+  uint32 dst_module = 4;
+  uint32 dst_port = 5;
+}
+
+message PatchRolesDescriptor {
+  uint32 note_source = 1;
+  uint32 activity_gate = 2;
+  uint32 external_input = 3;
+  // Mono output bus (engine duals to hardware L+R).
+  uint32 output_tap_module = 4;
+  uint32 output_tap_port = 5;
+}
+
+message PatchSnapshot {
+  repeated ControlDescriptor controls = 1;
+  repeated CableDescriptor cables = 2;
+  repeated ModuleInstanceDescriptor modules = 3;
+  PatchRolesDescriptor roles = 4;
+  repeated IoEndpointDescriptor io_endpoints = 5;
+  // Full document JSON for save/file interchange.
+  string document_json = 6;
+  // Preferred control-surface canvas size (cell counts).
+  PatchCanvas canvas = 7;
+}
+
+message SetModuleCoordinatesRequest {
+  uint32 module_id = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+}
+
+message ModuleCoordinatesEntry {
+  uint32 module_id = 1;
+  uint32 x = 2;
+  uint32 y = 3;
+}
+
+message SetCoordinatesRequest {
+  repeated ModuleCoordinatesEntry modules = 1;
+  // When set, updates the patch canvas size.
+  PatchCanvas canvas = 2;
+}
+
+message AddModuleRequest {
+  string kind = 1;
+}
+
+message RemoveModuleRequest {
+  uint32 module_id = 1;
+}
+
+message ConnectRequest {
+  uint32 src_module = 1;
+  uint32 src_port = 2;
+  uint32 dst_module = 3;
+  uint32 dst_port = 4;
+}
+
+message DisconnectRequest {
+  // Prefer cable_id when known; otherwise match endpoints.
+  uint32 cable_id = 1;
+  uint32 src_module = 2;
+  uint32 src_port = 3;
+  uint32 dst_module = 4;
+  uint32 dst_port = 5;
+  bool use_cable_id = 6;
+}
+
+message LoadPatchRequest {
+  string document_json = 1;
+}
+
+message SavePatchResponse {
+  string document_json = 1;
+}
+
+// Assign which voice-module output is mixed to master Audio Out (L/R dual mono).
+message SetOutputTapRequest {
+  uint32 module = 1;
+  uint32 port = 2;
+}
