@@ -12,3 +12,9 @@ members = [
 version = "0.2.0"
 authors = ["Stephan Lagerwaard <stephanlagerwaard@gmail.com>"]
 edition = "2021"
+
+[workspace.dependencies]
+tracing = { version = "0.1", features = ["std"] }
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "registry", "json"] }
+tracing-appender = { version = "0.2", features = ["parking_lot"] }
+directories = "5.0"

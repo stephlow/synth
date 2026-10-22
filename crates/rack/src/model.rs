@@ -3,7 +3,6 @@
 use synth_proto::{ControlDescriptor, IoEndpointDescriptor, ModuleInstanceDescriptor, ModuleType};
 
 pub const DEFAULT_ENGINE_ADDR: &str = "http://127.0.0.1:50051";
-pub const DEFAULT_LOG_FILE: &str = "rack.log";
 pub const DEFAULT_PATCH_FILE: &str = "patch.json";
 /// Default directory hint for new save paths.
 pub const DEFAULT_PATCH_DIR: &str = "patches";

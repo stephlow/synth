@@ -24,39 +24,74 @@ use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use crossterm::ExecutableCommand;
+use directories::ProjectDirs;
 use futures::{FutureExt, StreamExt};
 use ratatui::Terminal;
 use synth_proto::synth_client::SynthClient;
 use synth_proto::Empty;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use app::App;
 use draw::draw;
 use keys::handle_key;
-use model::{DEFAULT_ENGINE_ADDR, DEFAULT_LOG_FILE};
+use model::DEFAULT_ENGINE_ADDR;
+
+/// Holds the tracing worker guard for the lifetime of the application.
+/// When dropped, flushes any buffered log events.
+struct LogGuard(#[allow(dead_code)] WorkerGuard);
+
+fn init_tracing() -> LogGuard {
+    // Platform-standard data directory: ~/.local/share/synth/logs (Linux),
+    // ~/Library/Application Support/synth/logs (macOS), %LOCALAPPDATA%\synth\logs (Windows)
+    let proj_dirs = ProjectDirs::from("com", "stephlow", "synth")
+        .expect("Failed to get project directories");
+    let log_dir = proj_dirs.data_local_dir().join("logs");
+    std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
+
+    // Daily rolling with max 5 files (tracing-appender 0.2 doesn't support size-based rotation;
+    // logroller crate would be needed for true size-based rotation).
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("synth")
+        .filename_suffix("log")
+        .max_log_files(5)
+        .build(&log_dir)
+        .expect("Failed to create rolling file appender");
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
+    // JSON structured logging for machine parsing
+    let json_layer = fmt::layer()
+        .json()
+        .with_ansi(false)
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(non_blocking);
+
+    // Env filter: RUST_LOG=synth=trace,dsp=debug,engine=info,rack=debug
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
+        .init();
+
+    LogGuard(guard)
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let log_path = std::env::var("RACK_LOG").unwrap_or_else(|_| DEFAULT_LOG_FILE.to_string());
-    let log_dir = std::path::Path::new(&log_path)
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
-    let log_name = std::path::Path::new(&log_path)
-        .file_name()
-        .unwrap_or_else(|| std::ffi::OsStr::new(DEFAULT_LOG_FILE));
-    let file_appender = tracing_appender::rolling::never(log_dir, log_name);
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    tracing_subscriber::fmt()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // Initialize tracing FIRST, before any other logging
+    let _log_guard = init_tracing();
 
-    info!(version = env!("CARGO_PKG_VERSION"), log_path = %log_path, "starting rack");
+    info!(version = env!("CARGO_PKG_VERSION"), "starting rack");
 
     let addr = std::env::args()
         .nth(1)

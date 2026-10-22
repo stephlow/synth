@@ -17,6 +17,6 @@ schemars = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-std"] }
 tokio-stream = "0.1"
 tonic = "0.12"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 rmcp = { version = "2.2", features = ["server", "macros", "transport-io"] }

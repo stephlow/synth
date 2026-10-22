@@ -25,7 +25,7 @@ mod server;
 use rmcp::{ServiceExt, transport::stdio};
 use synth_proto::synth_client::SynthClient;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 use server::SynthMcp;
 
@@ -33,12 +33,24 @@ const DEFAULT_ENGINE_ADDR: &str = "http://127.0.0.1:50051";
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
+    // JSON structured logging to stderr (stdout reserved for MCP transport)
+    let json_layer = fmt::layer()
+        .json()
         .with_ansi(false)
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_thread_ids(true)
+        .with_thread_names(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_writer(std::io::stderr);
+
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(json_layer)
         .init();
 
     let addr = std::env::args()

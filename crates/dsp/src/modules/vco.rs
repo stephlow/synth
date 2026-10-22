@@ -1,4 +1,5 @@
 use crate::module::{port, BlockContext, Module};
+use tracing::{trace, instrument};
 
 /// Voltage-controlled oscillator. Pitch is 1V/oct relative to 440 Hz;
 /// `fm` is summed in as additional octaves (for through-zero-style FM
@@ -68,7 +69,9 @@ impl Module for Vco {
         4
     }
 
+    #[instrument(level = "trace", skip(self, inputs, outputs, ctx), fields(module = "VCO"))]
     fn process(&mut self, inputs: &[f32], outputs: &mut [f32], ctx: &BlockContext) {
+        trace!(frames = ctx.frames, "processing VCO block");
         let pitch_in = port(inputs, Self::IN_PITCH, ctx);
         let fm_in = port(inputs, Self::IN_FM, ctx);
 
