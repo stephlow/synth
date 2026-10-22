@@ -156,7 +156,7 @@ message IoChannelMeter {
 message ModuleSignal {
   uint32 module_id = 1;
   float peak = 2;
-  // Decimated recent block for tile glyphs (typically ~32 samples).
+  // Decimated recent block for tile glyphs (typically ~128 samples).
   repeated float waveform = 3;
 }
 

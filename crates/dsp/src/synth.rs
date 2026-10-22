@@ -525,15 +525,26 @@ impl Synth {
             bank.module_peaks[i] = peak;
 
             let wave_base = i * MODULE_SIGNAL_WAVE_LEN;
-            let samples = self.voices[best_voice].module_output(id, best_port);
-            if samples.is_empty() {
+            // Local buffer avoids borrowing `live_signals` while reading voices.
+            let mut wave_tmp = [0.0f32; MODULE_SIGNAL_WAVE_LEN];
+            let custom = self.voices[best_voice].fill_display_wave(id, &mut wave_tmp);
+            if custom > 0 {
                 for k in 0..MODULE_SIGNAL_WAVE_LEN {
-                    bank.module_waves[wave_base + k] = 0.0;
+                    bank.module_waves[wave_base + k] =
+                        if k < custom { wave_tmp[k] } else { 0.0 };
                 }
             } else {
-                for k in 0..MODULE_SIGNAL_WAVE_LEN {
-                    let idx = (k * samples.len()) / MODULE_SIGNAL_WAVE_LEN;
-                    bank.module_waves[wave_base + k] = samples.get(idx).copied().unwrap_or(0.0);
+                let samples = self.voices[best_voice].module_output(id, best_port);
+                if samples.is_empty() {
+                    for k in 0..MODULE_SIGNAL_WAVE_LEN {
+                        bank.module_waves[wave_base + k] = 0.0;
+                    }
+                } else {
+                    for k in 0..MODULE_SIGNAL_WAVE_LEN {
+                        let idx = (k * samples.len()) / MODULE_SIGNAL_WAVE_LEN;
+                        bank.module_waves[wave_base + k] =
+                            samples.get(idx).copied().unwrap_or(0.0);
+                    }
                 }
             }
         }

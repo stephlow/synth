@@ -113,6 +113,10 @@ pub fn cell_origin(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) 
 
 /// Tile rect for a lattice cell (clipped to canvas).
 pub fn tile_rect(pos: LatticePos, view: LatticePos, canvas: Rect, geom: Geom) -> Option<Rect> {
+    // Cells scrolled off the left/top must not clamp onto the first column/row.
+    if pos.x < view.x || pos.y < view.y {
+        return None;
+    }
     let (x, y) = cell_origin(pos, view, canvas, geom);
     if x >= canvas.x + canvas.width || y >= canvas.y + canvas.height {
         return None;

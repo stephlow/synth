@@ -4,7 +4,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use crate::draw::glyph::{paint_glyph, GlyphKind, GlyphPaint};
+use crate::draw::glyph::{paint_glyph, GlyphDetail, GlyphKind, GlyphPaint};
 use crate::draw::style::{
     bg, tile_body_armed, tile_body_hot, tile_body_idle, tile_body_soft, tile_border_armed,
     tile_border_hot, tile_border_idle, tile_border_soft, tile_label_armed, tile_label_hot,
@@ -22,8 +22,8 @@ pub struct TileView<'a> {
     pub soft: bool,
     /// Live samples for scope glyph.
     pub samples: Option<&'a [f32]>,
-    /// Quantizer scale mask for degree glyph.
-    pub scale_mask: Option<u16>,
+    /// Param-derived glyph state.
+    pub detail: GlyphDetail,
 }
 
 pub fn draw_tile(buf: &mut Buffer, area: Rect, view: &TileView<'_>) {
@@ -171,7 +171,7 @@ pub fn draw_tile(buf: &mut Buffer, area: Rect, view: &TileView<'_>) {
             intensity: fill_level,
             style: body_style,
             samples: view.samples,
-            scale_mask: view.scale_mask,
+            detail: view.detail,
         },
     );
 }

@@ -931,30 +931,102 @@ impl App {
         crate::param_fmt::format_value(c, v, &self.module_types)
     }
 
-    /// Scale pitch-class mask for a quantizer module (from its Scale param), if any.
-    pub fn quantizer_scale_mask(&self, module_idx: usize) -> Option<u16> {
-        let m = self.modules.get(module_idx)?;
-        if m.kind != "quantizer" {
-            return None;
-        }
+    /// Read a module param by UI name (defaults if missing).
+    fn param_named(&self, module_idx: usize, name: &str, default: f32) -> f32 {
+        let Some(m) = self.modules.get(module_idx) else {
+            return default;
+        };
         for it in &m.items {
             let Item::Param { control_index } = it else {
                 continue;
             };
-            let c = self.controls.get(*control_index)?;
-            if c.name != "Scale" {
+            let Some(c) = self.controls.get(*control_index) else {
                 continue;
-            }
-            let v = self.values.get(*control_index).copied().unwrap_or(1.0);
-            let choices = crate::param_fmt::choices_for(c, &self.module_types);
-            let idx = if choices.is_empty() {
-                v.round().max(0.0) as usize
-            } else {
-                v.round().clamp(0.0, (choices.len() - 1) as f32) as usize
             };
-            return Some(crate::scale_ui::mask_for_index(idx));
+            if c.name == name {
+                return self.values.get(*control_index).copied().unwrap_or(default);
+            }
         }
-        None
+        default
+    }
+
+    /// Param-derived glyph state for kind-specific tile art.
+    pub fn glyph_detail(&self, module_idx: usize) -> crate::draw::glyph::GlyphDetail {
+        use crate::draw::glyph::GlyphDetail;
+        let Some(m) = self.modules.get(module_idx) else {
+            return GlyphDetail::None;
+        };
+        match m.kind.as_str() {
+            "quantizer" => {
+                let v = self.param_named(module_idx, "Scale", 1.0);
+                // Resolve index via control choices when present.
+                let mut idx = v.round().max(0.0) as usize;
+                for it in &m.items {
+                    let Item::Param { control_index } = it else {
+                        continue;
+                    };
+                    let Some(c) = self.controls.get(*control_index) else {
+                        continue;
+                    };
+                    if c.name != "Scale" {
+                        continue;
+                    }
+                    let choices = crate::param_fmt::choices_for(c, &self.module_types);
+                    if !choices.is_empty() {
+                        idx = v.round().clamp(0.0, (choices.len() - 1) as f32) as usize;
+                    }
+                    break;
+                }
+                GlyphDetail::Quantizer {
+                    mask: crate::scale_ui::mask_for_index(idx),
+                }
+            }
+            "comparator" => GlyphDetail::Comparator {
+                thresh: self.param_named(module_idx, "Thresh", 0.0),
+            },
+            "logic" => GlyphDetail::Logic {
+                mode: self.param_named(module_idx, "Mode", 0.0).round().clamp(0.0, 3.0) as u8,
+            },
+            "crossfade" => GlyphDetail::Crossfade {
+                fade: self.param_named(module_idx, "Fade", 0.5).clamp(0.0, 1.0),
+            },
+            "edge" => GlyphDetail::Edge {
+                width_ms: self.param_named(module_idx, "Width", 5.0),
+            },
+            "bernoulli" => GlyphDetail::Bernoulli {
+                chance: self.param_named(module_idx, "Chance", 0.5).clamp(0.0, 1.0),
+            },
+            "euclidean" => GlyphDetail::Euclidean {
+                steps: self.param_named(module_idx, "Steps", 16.0).round().clamp(1.0, 32.0) as u8,
+                fill: self.param_named(module_idx, "Fill", 4.0).round().clamp(0.0, 32.0) as u8,
+                rotate: self
+                    .param_named(module_idx, "Rotate", 0.0)
+                    .round()
+                    .clamp(0.0, 31.0) as u8,
+            },
+            "random_trig" => GlyphDetail::RandomTrig {
+                rate_hz: self.param_named(module_idx, "Rate", 4.0),
+            },
+            "switch" => GlyphDetail::Switch {
+                n_steps: self.param_named(module_idx, "Steps", 4.0).round().clamp(2.0, 4.0) as u8,
+            },
+            "clip" => GlyphDetail::Clip {
+                level: self.param_named(module_idx, "Level", 1.0),
+            },
+            "saturator" => GlyphDetail::Saturator {
+                drive: self.param_named(module_idx, "Drive", 2.0),
+                mix: self.param_named(module_idx, "Mix", 1.0),
+            },
+            "bitcrush" => GlyphDetail::Bitcrush {
+                bits: self.param_named(module_idx, "Bits", 8.0),
+                rate: self.param_named(module_idx, "Rate", 0.25),
+            },
+            "env_follow" => GlyphDetail::EnvFollow {
+                rise_s: self.param_named(module_idx, "Rise", 0.01),
+                fall_s: self.param_named(module_idx, "Fall", 0.1),
+            },
+            _ => GlyphDetail::None,
+        }
     }
 
     pub fn param_indices_for_module(&self, module_idx: usize) -> Vec<usize> {

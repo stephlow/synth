@@ -5,8 +5,10 @@
 
 use crate::module::Module;
 use crate::modules::{
-    Attenuverter, ClockDiv, Delay, Envelope, Function, Io, Lfo, Lpg, MidiToCv, Mixer, Noise,
-    Oscilloscope, Quantizer, RingMod, SampleHold, Sequencer, Slew, Vca, Vcf, Vco, Wavefolder,
+    Abs, Attenuverter, Bernoulli, Bitcrush, Clip, ClockDiv, ClockMult, Comparator, Crossfade,
+    Delay, Edge, Envelope, EnvFollow, Euclidean, Function, Io, Lfo, Link, Logic, Lpg, MinMax,
+    MidiToCv, Mixer, Noise, Oscilloscope, Quantizer, RandomTrig, RingMod, SampleHold, Saturator,
+    Sequencer, Slew, Switch, TrackHold, Vca, Vcf, Vco, Wavefolder,
 };
 use crate::modules::scale::{SCALE_INDEX_MAX, SCALE_MAJOR, SCALE_NAMES};
 use crate::patch::ModuleInstance;
@@ -146,8 +148,17 @@ fn create_sequencer(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
     Box::new(seq)
 }
 
-fn create_oscilloscope(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
-    Box::new(Oscilloscope::new())
+fn create_oscilloscope(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Oscilloscope::new(sr);
+    m.set_param(
+        Oscilloscope::PARAM_TIME,
+        i.param_value(Oscilloscope::PARAM_TIME, Oscilloscope::DEFAULT_TIME_MS),
+    );
+    m.set_param(
+        Oscilloscope::PARAM_Y_SCALE,
+        i.param_value(Oscilloscope::PARAM_Y_SCALE, Oscilloscope::DEFAULT_Y_SCALE),
+    );
+    Box::new(m)
 }
 
 fn create_slew(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
@@ -226,6 +237,156 @@ fn create_ring_mod(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
     m.set_param(
         RingMod::PARAM_LEVEL,
         i.param_value(RingMod::PARAM_LEVEL, 1.0),
+    );
+    Box::new(m)
+}
+
+fn create_comparator(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Comparator::new();
+    m.set_param(
+        Comparator::PARAM_THRESH,
+        i.param_value(Comparator::PARAM_THRESH, 0.0),
+    );
+    Box::new(m)
+}
+
+fn create_logic(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Logic::new();
+    m.set_param(Logic::PARAM_MODE, i.param_value(Logic::PARAM_MODE, 0.0));
+    Box::new(m)
+}
+
+fn create_crossfade(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Crossfade::new();
+    m.set_param(
+        Crossfade::PARAM_FADE,
+        i.param_value(Crossfade::PARAM_FADE, 0.5),
+    );
+    Box::new(m)
+}
+
+fn create_edge(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Edge::new(sr);
+    m.set_param(
+        Edge::PARAM_WIDTH,
+        i.param_value(Edge::PARAM_WIDTH, 5.0),
+    );
+    Box::new(m)
+}
+
+fn create_bernoulli(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Bernoulli::new(sr, i.id.wrapping_add(17));
+    m.set_param(
+        Bernoulli::PARAM_CHANCE,
+        i.param_value(Bernoulli::PARAM_CHANCE, 0.5),
+    );
+    Box::new(m)
+}
+
+fn create_euclidean(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Euclidean::new(sr);
+    m.set_param(
+        Euclidean::PARAM_STEPS,
+        i.param_value(Euclidean::PARAM_STEPS, 16.0),
+    );
+    m.set_param(
+        Euclidean::PARAM_FILL,
+        i.param_value(Euclidean::PARAM_FILL, 4.0),
+    );
+    m.set_param(
+        Euclidean::PARAM_ROTATE,
+        i.param_value(Euclidean::PARAM_ROTATE, 0.0),
+    );
+    Box::new(m)
+}
+
+fn create_clock_mult(sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
+    Box::new(ClockMult::new(sr))
+}
+
+fn create_link(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Link::new(sr);
+    m.set_param(Link::PARAM_BPM, i.param_value(Link::PARAM_BPM, 120.0));
+    m.set_param(
+        Link::PARAM_QUANTUM,
+        i.param_value(Link::PARAM_QUANTUM, 4.0),
+    );
+    m.set_param(Link::PARAM_DIV, i.param_value(Link::PARAM_DIV, 2.0)); // index 2 → div 4
+    m.set_param(Link::PARAM_PLAY, i.param_value(Link::PARAM_PLAY, 1.0));
+    Box::new(m)
+}
+
+fn create_random_trig(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = RandomTrig::new(sr, i.id.wrapping_add(99));
+    m.set_param(
+        RandomTrig::PARAM_RATE,
+        i.param_value(RandomTrig::PARAM_RATE, 4.0),
+    );
+    Box::new(m)
+}
+
+fn create_track_hold(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
+    Box::new(TrackHold::new())
+}
+
+fn create_switch(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Switch::new();
+    m.set_param(
+        Switch::PARAM_STEPS,
+        i.param_value(Switch::PARAM_STEPS, 4.0),
+    );
+    Box::new(m)
+}
+
+fn create_minmax(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
+    Box::new(MinMax::new())
+}
+
+fn create_abs(_sr: f32, _i: &ModuleInstance) -> Box<dyn Module> {
+    Box::new(Abs::new())
+}
+
+fn create_clip(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Clip::new();
+    m.set_param(Clip::PARAM_LEVEL, i.param_value(Clip::PARAM_LEVEL, 1.0));
+    Box::new(m)
+}
+
+fn create_saturator(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Saturator::new();
+    m.set_param(
+        Saturator::PARAM_DRIVE,
+        i.param_value(Saturator::PARAM_DRIVE, 2.0),
+    );
+    m.set_param(
+        Saturator::PARAM_MIX,
+        i.param_value(Saturator::PARAM_MIX, 1.0),
+    );
+    Box::new(m)
+}
+
+fn create_bitcrush(_sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = Bitcrush::new();
+    m.set_param(
+        Bitcrush::PARAM_BITS,
+        i.param_value(Bitcrush::PARAM_BITS, 8.0),
+    );
+    m.set_param(
+        Bitcrush::PARAM_RATE,
+        i.param_value(Bitcrush::PARAM_RATE, 0.25),
+    );
+    Box::new(m)
+}
+
+fn create_env_follow(sr: f32, i: &ModuleInstance) -> Box<dyn Module> {
+    let mut m = EnvFollow::new(sr);
+    m.set_param(
+        EnvFollow::PARAM_RISE,
+        i.param_value(EnvFollow::PARAM_RISE, 0.01),
+    );
+    m.set_param(
+        EnvFollow::PARAM_FALL,
+        i.param_value(EnvFollow::PARAM_FALL, 0.1),
     );
     Box::new(m)
 }
@@ -594,12 +755,20 @@ static ENTRIES: &[Entry] = &[
             }],
             outputs: &[
                 PortMeta {
-                    name: "bipolar",
-                    index: Lfo::OUT_BIPOLAR,
+                    name: "sine",
+                    index: Lfo::OUT_SINE,
                 },
                 PortMeta {
-                    name: "unipolar",
-                    index: Lfo::OUT_UNIPOLAR,
+                    name: "saw",
+                    index: Lfo::OUT_SAW,
+                },
+                PortMeta {
+                    name: "square",
+                    index: Lfo::OUT_SQUARE,
+                },
+                PortMeta {
+                    name: "triangle",
+                    index: Lfo::OUT_TRIANGLE,
                 },
             ],
             params: &[ParamMeta {
@@ -608,8 +777,8 @@ static ENTRIES: &[Entry] = &[
                 min: 0.1,
                 max: 20.0,
                 default: 2.0,
-        choices: &[],
-    }],
+                choices: &[],
+            }],
         },
         factory: create_lfo,
     },
@@ -715,10 +884,20 @@ static ENTRIES: &[Entry] = &[
             kind: "noise",
             display_name: "Noise",
             inputs: &[],
-            outputs: &[PortMeta {
-                name: "white",
-                index: Noise::OUT_WHITE,
-            }],
+            outputs: &[
+                PortMeta {
+                    name: "white",
+                    index: Noise::OUT_WHITE,
+                },
+                PortMeta {
+                    name: "pink",
+                    index: Noise::OUT_PINK,
+                },
+                PortMeta {
+                    name: "red",
+                    index: Noise::OUT_RED,
+                },
+            ],
             params: &[],
         },
         factory: create_noise,
@@ -1101,7 +1280,24 @@ static ENTRIES: &[Entry] = &[
                 name: "audio",
                 index: Oscilloscope::OUT_AUDIO,
             }],
-            params: &[],
+            params: &[
+                ParamMeta {
+                    name: "Time",
+                    index: Oscilloscope::PARAM_TIME,
+                    min: Oscilloscope::MIN_TIME_MS,
+                    max: Oscilloscope::MAX_TIME_MS,
+                    default: Oscilloscope::DEFAULT_TIME_MS,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Y Scale",
+                    index: Oscilloscope::PARAM_Y_SCALE,
+                    min: 0.1,
+                    max: 20.0,
+                    default: Oscilloscope::DEFAULT_Y_SCALE,
+                    choices: &[],
+                },
+            ],
         },
         factory: create_oscilloscope,
     },
@@ -1158,5 +1354,557 @@ static ENTRIES: &[Entry] = &[
             ],
         },
         factory: create_io,
+    },
+    // --- Utility / logic ---
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "comparator",
+            display_name: "Comparator",
+            inputs: &[
+                PortMeta {
+                    name: "signal",
+                    index: Comparator::IN_SIGNAL,
+                },
+                PortMeta {
+                    name: "thresh_cv",
+                    index: Comparator::IN_THRESH_CV,
+                },
+            ],
+            outputs: &[
+                PortMeta {
+                    name: "gate",
+                    index: Comparator::OUT_GATE,
+                },
+                PortMeta {
+                    name: "not",
+                    index: Comparator::OUT_NOT,
+                },
+            ],
+            params: &[ParamMeta {
+                name: "Thresh",
+                index: Comparator::PARAM_THRESH,
+                min: -1.0,
+                max: 1.0,
+                default: 0.0,
+                choices: &[],
+            }],
+        },
+        factory: create_comparator,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "logic",
+            display_name: "Logic",
+            inputs: &[
+                PortMeta {
+                    name: "a",
+                    index: Logic::IN_A,
+                },
+                PortMeta {
+                    name: "b",
+                    index: Logic::IN_B,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "out",
+                index: Logic::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Mode",
+                index: Logic::PARAM_MODE,
+                min: 0.0,
+                max: 3.0,
+                default: 0.0,
+                choices: &["AND", "OR", "XOR", "NOT"],
+            }],
+        },
+        factory: create_logic,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "crossfade",
+            display_name: "Crossfade",
+            inputs: &[
+                PortMeta {
+                    name: "a",
+                    index: Crossfade::IN_A,
+                },
+                PortMeta {
+                    name: "b",
+                    index: Crossfade::IN_B,
+                },
+                PortMeta {
+                    name: "fade_cv",
+                    index: Crossfade::IN_FADE_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "mix",
+                index: Crossfade::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Fade",
+                index: Crossfade::PARAM_FADE,
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                choices: &[],
+            }],
+        },
+        factory: create_crossfade,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "edge",
+            display_name: "Edge",
+            inputs: &[PortMeta {
+                name: "in",
+                index: Edge::IN,
+            }],
+            outputs: &[PortMeta {
+                name: "trig",
+                index: Edge::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Width",
+                index: Edge::PARAM_WIDTH,
+                min: 0.5,
+                max: 50.0,
+                default: 5.0,
+                choices: &[],
+            }],
+        },
+        factory: create_edge,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "minmax",
+            display_name: "MinMax",
+            inputs: &[
+                PortMeta {
+                    name: "a",
+                    index: MinMax::IN_A,
+                },
+                PortMeta {
+                    name: "b",
+                    index: MinMax::IN_B,
+                },
+            ],
+            outputs: &[
+                PortMeta {
+                    name: "min",
+                    index: MinMax::OUT_MIN,
+                },
+                PortMeta {
+                    name: "max",
+                    index: MinMax::OUT_MAX,
+                },
+            ],
+            params: &[],
+        },
+        factory: create_minmax,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "abs",
+            display_name: "Abs",
+            inputs: &[PortMeta {
+                name: "in",
+                index: Abs::IN,
+            }],
+            outputs: &[PortMeta {
+                name: "out",
+                index: Abs::OUT,
+            }],
+            params: &[],
+        },
+        factory: create_abs,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "clip",
+            display_name: "Clip",
+            inputs: &[
+                PortMeta {
+                    name: "in",
+                    index: Clip::IN,
+                },
+                PortMeta {
+                    name: "level_cv",
+                    index: Clip::IN_LEVEL_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "out",
+                index: Clip::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Level",
+                index: Clip::PARAM_LEVEL,
+                min: 0.01,
+                max: 2.0,
+                default: 1.0,
+                choices: &[],
+            }],
+        },
+        factory: create_clip,
+    },
+    // --- Rhythm / random ---
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "bernoulli",
+            display_name: "Bernoulli",
+            inputs: &[
+                PortMeta {
+                    name: "trig",
+                    index: Bernoulli::IN_TRIG,
+                },
+                PortMeta {
+                    name: "chance_cv",
+                    index: Bernoulli::IN_CHANCE_CV,
+                },
+            ],
+            outputs: &[
+                PortMeta {
+                    name: "a",
+                    index: Bernoulli::OUT_A,
+                },
+                PortMeta {
+                    name: "b",
+                    index: Bernoulli::OUT_B,
+                },
+            ],
+            params: &[ParamMeta {
+                name: "Chance",
+                index: Bernoulli::PARAM_CHANCE,
+                min: 0.0,
+                max: 1.0,
+                default: 0.5,
+                choices: &[],
+            }],
+        },
+        factory: create_bernoulli,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "euclidean",
+            display_name: "Euclidean",
+            inputs: &[
+                PortMeta {
+                    name: "clock",
+                    index: Euclidean::IN_CLOCK,
+                },
+                PortMeta {
+                    name: "reset",
+                    index: Euclidean::IN_RESET,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "gate",
+                index: Euclidean::OUT_GATE,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Steps",
+                    index: Euclidean::PARAM_STEPS,
+                    min: 1.0,
+                    max: 32.0,
+                    default: 16.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Fill",
+                    index: Euclidean::PARAM_FILL,
+                    min: 0.0,
+                    max: 32.0,
+                    default: 4.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Rotate",
+                    index: Euclidean::PARAM_ROTATE,
+                    min: 0.0,
+                    max: 31.0,
+                    default: 0.0,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_euclidean,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "clock_mult",
+            display_name: "Clock Mult",
+            inputs: &[PortMeta {
+                name: "clock",
+                index: ClockMult::IN_CLOCK,
+            }],
+            outputs: &[
+                PortMeta {
+                    name: "x2",
+                    index: ClockMult::OUT_X2,
+                },
+                PortMeta {
+                    name: "x3",
+                    index: ClockMult::OUT_X3,
+                },
+                PortMeta {
+                    name: "x4",
+                    index: ClockMult::OUT_X4,
+                },
+            ],
+            params: &[],
+        },
+        factory: create_clock_mult,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "link",
+            display_name: "Link",
+            inputs: &[],
+            outputs: &[
+                PortMeta {
+                    name: "clock",
+                    index: Link::OUT_CLOCK,
+                },
+                PortMeta {
+                    name: "phase",
+                    index: Link::OUT_PHASE,
+                },
+                PortMeta {
+                    name: "play",
+                    index: Link::OUT_PLAY,
+                },
+            ],
+            params: &[
+                ParamMeta {
+                    name: "BPM",
+                    index: Link::PARAM_BPM,
+                    min: 20.0,
+                    max: 300.0,
+                    default: 120.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Quantum",
+                    index: Link::PARAM_QUANTUM,
+                    min: 1.0,
+                    max: 16.0,
+                    default: 4.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Div",
+                    index: Link::PARAM_DIV,
+                    min: 0.0,
+                    max: 3.0,
+                    default: 2.0, // index → 4 clocks/beat
+                    choices: &["1", "2", "4", "8"],
+                },
+                ParamMeta {
+                    name: "Play",
+                    index: Link::PARAM_PLAY,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    choices: &["Off", "On"],
+                },
+            ],
+        },
+        factory: create_link,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "random_trig",
+            display_name: "Random Trig",
+            inputs: &[],
+            outputs: &[PortMeta {
+                name: "trig",
+                index: RandomTrig::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Rate",
+                index: RandomTrig::PARAM_RATE,
+                min: 0.05,
+                max: 40.0,
+                default: 4.0,
+                choices: &[],
+            }],
+        },
+        factory: create_random_trig,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "track_hold",
+            display_name: "Track & Hold",
+            inputs: &[
+                PortMeta {
+                    name: "signal",
+                    index: TrackHold::IN_SIGNAL,
+                },
+                PortMeta {
+                    name: "gate",
+                    index: TrackHold::IN_GATE,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "held",
+                index: TrackHold::OUT,
+            }],
+            params: &[],
+        },
+        factory: create_track_hold,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "switch",
+            display_name: "Switch",
+            inputs: &[
+                PortMeta {
+                    name: "in1",
+                    index: Switch::IN_1,
+                },
+                PortMeta {
+                    name: "in2",
+                    index: Switch::IN_2,
+                },
+                PortMeta {
+                    name: "in3",
+                    index: Switch::IN_3,
+                },
+                PortMeta {
+                    name: "in4",
+                    index: Switch::IN_4,
+                },
+                PortMeta {
+                    name: "clock",
+                    index: Switch::IN_CLOCK,
+                },
+                PortMeta {
+                    name: "reset",
+                    index: Switch::IN_RESET,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "out",
+                index: Switch::OUT,
+            }],
+            params: &[ParamMeta {
+                name: "Steps",
+                index: Switch::PARAM_STEPS,
+                min: 2.0,
+                max: 4.0,
+                default: 4.0,
+                choices: &[],
+            }],
+        },
+        factory: create_switch,
+    },
+    // --- Processors ---
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "saturator",
+            display_name: "Saturator",
+            inputs: &[
+                PortMeta {
+                    name: "audio",
+                    index: Saturator::IN,
+                },
+                PortMeta {
+                    name: "drive_cv",
+                    index: Saturator::IN_DRIVE_CV,
+                },
+            ],
+            outputs: &[PortMeta {
+                name: "audio",
+                index: Saturator::OUT,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Drive",
+                    index: Saturator::PARAM_DRIVE,
+                    min: 0.1,
+                    max: 20.0,
+                    default: 2.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Mix",
+                    index: Saturator::PARAM_MIX,
+                    min: 0.0,
+                    max: 1.0,
+                    default: 1.0,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_saturator,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "bitcrush",
+            display_name: "Bitcrush",
+            inputs: &[PortMeta {
+                name: "audio",
+                index: Bitcrush::IN,
+            }],
+            outputs: &[PortMeta {
+                name: "audio",
+                index: Bitcrush::OUT,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Bits",
+                    index: Bitcrush::PARAM_BITS,
+                    min: 1.0,
+                    max: 16.0,
+                    default: 8.0,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Rate",
+                    index: Bitcrush::PARAM_RATE,
+                    min: 0.01,
+                    max: 1.0,
+                    default: 0.25,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_bitcrush,
+    },
+    Entry {
+        info: ModuleTypeInfo {
+            kind: "env_follow",
+            display_name: "Env Follow",
+            inputs: &[PortMeta {
+                name: "audio",
+                index: EnvFollow::IN,
+            }],
+            outputs: &[PortMeta {
+                name: "cv",
+                index: EnvFollow::OUT,
+            }],
+            params: &[
+                ParamMeta {
+                    name: "Rise",
+                    index: EnvFollow::PARAM_RISE,
+                    min: 0.001,
+                    max: 2.0,
+                    default: 0.01,
+                    choices: &[],
+                },
+                ParamMeta {
+                    name: "Fall",
+                    index: EnvFollow::PARAM_FALL,
+                    min: 0.001,
+                    max: 5.0,
+                    default: 0.1,
+                    choices: &[],
+                },
+            ],
+        },
+        factory: create_env_follow,
     },
 ];

@@ -1,7 +1,7 @@
 //! Composable TUI drawing — lattice + mode overlays.
 
 mod assemble;
-mod glyph;
+pub(crate) mod glyph;
 mod lattice;
 pub mod layout;
 mod menu;

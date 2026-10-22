@@ -482,7 +482,8 @@ impl Patch {
                 output_tap_module: io_in,
                 output_tap_port: 0,
             },
-            io_endpoints: standard_io_endpoints(io_in, at(0, 1), at(1, 1)),
+            // Column 0 system strip: MIDI, Audio In, Audio Out (top → bottom).
+            io_endpoints: standard_io_endpoints(io_in, at(0, 1), at(0, 2)),
             canvas: Some(PatchCanvas {
                 width: 8,
                 height: 6,
@@ -499,7 +500,8 @@ impl Patch {
     ///   SnClk  KickSeq      KickVCO        KickEnv KickVCA
     ///          SnareSeq Noise              SnEnv   SnVCA
     ///   MIDI   LeadVCO LeadVCF LeadEnvA LeadEnvF LeadVCA  Mix Scope
-    ///   In     Out
+    ///   In
+    ///   Out
     /// ```
     pub fn example_groove() -> Self {
         let mut next_id = 0u32;
@@ -886,7 +888,7 @@ impl Patch {
 
         let cables = vec![
             // --- Bass ---
-            cable(clock, Lfo::OUT_BIPOLAR, bass_seq, Sequencer::IN_CLOCK),
+            cable(clock, Lfo::OUT_SINE, bass_seq, Sequencer::IN_CLOCK),
             cable(bass_seq, Sequencer::OUT_CV, bass_quant, Quantizer::IN_CV),
             cable(bass_quant, Quantizer::OUT_CV, bass_vco, Vco::IN_PITCH),
             cable(bass_vco, Vco::OUT_SAW, bass_vcf, Vcf::IN_AUDIO),
@@ -895,14 +897,14 @@ impl Patch {
             cable(bass_env, Envelope::OUT_CV, bass_vca, Vca::IN_CV),
             cable(bass_seq, Sequencer::OUT_GATE, bass_env, Envelope::IN_GATE),
             // --- Kick ---
-            cable(clock, Lfo::OUT_BIPOLAR, kick_seq, Sequencer::IN_CLOCK),
+            cable(clock, Lfo::OUT_SINE, kick_seq, Sequencer::IN_CLOCK),
             cable(kick_vco, Vco::OUT_SINE, kick_vca, Vca::IN_AUDIO),
             // Envelope into pitch for a little downward thump.
             cable(kick_env, Envelope::OUT_CV, kick_vco, Vco::IN_PITCH),
             cable(kick_env, Envelope::OUT_CV, kick_vca, Vca::IN_CV),
             cable(kick_seq, Sequencer::OUT_GATE, kick_env, Envelope::IN_GATE),
             // --- Snare ---
-            cable(snare_clock, Lfo::OUT_BIPOLAR, snare_seq, Sequencer::IN_CLOCK),
+            cable(snare_clock, Lfo::OUT_SINE, snare_seq, Sequencer::IN_CLOCK),
             cable(snare_noise, Noise::OUT_WHITE, snare_vca, Vca::IN_AUDIO),
             cable(snare_env, Envelope::OUT_CV, snare_vca, Vca::IN_CV),
             cable(snare_seq, Sequencer::OUT_GATE, snare_env, Envelope::IN_GATE),
@@ -935,7 +937,8 @@ impl Patch {
                 output_tap_module: scope,
                 output_tap_port: Oscilloscope::OUT_AUDIO,
             },
-            io_endpoints: standard_io_endpoints(io_in, at(0, 4), at(1, 4)),
+            // Column 0: MIDI (y=3), Audio In (y=4), Audio Out (y=5).
+            io_endpoints: standard_io_endpoints(io_in, at(0, 4), at(0, 5)),
             canvas: Some(PatchCanvas {
                 width: 16,
                 height: 10,
@@ -1402,6 +1405,14 @@ impl Voice {
     pub fn module_output_count(&self, module_id: u32) -> usize {
         match self.graph_index(module_id) {
             Some(idx) => self.graph.module_output_count(idx),
+            None => 0,
+        }
+    }
+
+    /// Prefer a module's custom display waveform (scope ring buffer, etc.).
+    pub fn fill_display_wave(&self, module_id: u32, out: &mut [f32]) -> usize {
+        match self.graph_index(module_id) {
+            Some(idx) => self.graph.fill_display_wave(idx, out),
             None => 0,
         }
     }

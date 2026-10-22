@@ -30,7 +30,9 @@ pub const MAX_IO_METER_CHANNELS: usize = 8;
 /// Max voice-graph modules tracked for live UI signal meters.
 pub const MAX_MODULE_SIGNALS: usize = 64;
 /// Decimated samples published per module for tile waveforms.
-pub const MODULE_SIGNAL_WAVE_LEN: usize = 32;
+/// Long enough that a ~2–5 ms audio window still looks like a sine (not
+/// a scribble) on the rack tile / gRPC scope view.
+pub const MODULE_SIGNAL_WAVE_LEN: usize = 128;
 /// Max patch cables tracked for live wire intensity.
 pub const MAX_CABLE_SIGNALS: usize = 128;
 

@@ -47,6 +47,14 @@ pub trait Module: Send {
     /// bespoke API.
     #[allow(unused_variables)]
     fn write_input(&mut self, port: usize, samples: &[f32]) {}
+
+    /// Optional display waveform for UI tiles (e.g. oscilloscope ring buffer).
+    /// Writes up to `out.len()` decimated samples; returns how many were
+    /// written, or `0` if this module has no custom display path.
+    #[allow(unused_variables)]
+    fn fill_display_wave(&self, out: &mut [f32]) -> usize {
+        0
+    }
 }
 
 /// Slices out port `port`'s block (`ctx.frames` samples) from a module's

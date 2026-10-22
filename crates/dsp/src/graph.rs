@@ -148,12 +148,24 @@ impl Graph {
         self.taps.len() - 1
     }
 
+    pub fn module(&self, index: usize) -> &dyn Module {
+        self.modules[index].as_ref()
+    }
+
     pub fn module_mut(&mut self, index: usize) -> &mut dyn Module {
         self.modules[index].as_mut()
     }
 
     pub fn is_module_active(&self, index: usize) -> bool {
         self.modules[index].is_active()
+    }
+
+    /// Prefer a module's custom display waveform when present (scope, etc.).
+    pub fn fill_display_wave(&self, module: usize, out: &mut [f32]) -> usize {
+        if module >= self.modules.len() {
+            return 0;
+        }
+        self.modules[module].fill_display_wave(out)
     }
 
     pub fn set_param(&mut self, module: usize, param: usize, value: f32) {

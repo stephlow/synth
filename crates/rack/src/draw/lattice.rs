@@ -7,7 +7,7 @@ use ratatui::Frame;
 
 use crate::draw::layout::{cell_origin, cursor_rect, tile_rect, Geom};
 use crate::draw::style::{canvas_bg, cursor_style, lattice_dot};
-use crate::draw::glyph::GlyphKind;
+use crate::draw::glyph::{GlyphDetail, GlyphKind};
 use crate::draw::tile::{draw_tile, TileView};
 use crate::draw::wires::{draw_wires, WireView};
 use crate::model::LatticePos;
@@ -38,8 +38,8 @@ pub struct TilePaint {
     pub use_scope: bool,
     /// Owned live waveform for this tile (per-module); scope uses shared buffer.
     pub live_wave: Option<Vec<f32>>,
-    /// Quantizer scale pitch-class mask for glyph.
-    pub scale_mask: Option<u16>,
+    /// Param-derived glyph state (scale mask, thresh, euclid fill, …).
+    pub detail: GlyphDetail,
 }
 
 pub fn draw_lattice(frame: &mut Frame, area: Rect, paint: &LatticePaint<'_>) {
@@ -125,7 +125,7 @@ pub fn draw_lattice(frame: &mut Frame, area: Rect, paint: &LatticePaint<'_>) {
                     soft: t.soft,
                     armed: t.armed && !paint.dimmed,
                     samples,
-                    scale_mask: t.scale_mask,
+                    detail: t.detail,
                 },
             );
         }
