@@ -501,42 +501,99 @@ fn build_output_stream(
 }
 
 /// Holds the tracing worker guard for the lifetime of the application.
+/// When dropped, flushes any buffered log events.
 struct LogGuard(#[allow(dead_code)] WorkerGuard);
 
 fn init_tracing() -> LogGuard {
-    // Platform-standard data directory: ~/.local/share/synth/logs (Linux),
-    // ~/Library/Application Support/synth/logs (macOS), %LOCALAPPDATA%\synth\logs (Windows)
+    // ──────────────────────────────────────────────────────────────────────
+    // LOG DIRECTORY: Platform-standard data directory (XDG on Linux)
+    // ──────────────────────────────────────────────────────────────────────
+    // Linux:   ~/.local/share/synth/logs/
+    // macOS:   ~/Library/Application Support/synth/logs/
+    // Windows: %LOCALAPPDATA%\synth\logs/
+    // 
+    // Using `directories` crate avoids hardcoding paths and respects OS conventions.
     let proj_dirs = ProjectDirs::from("com", "stephlow", "synth")
         .expect("Failed to get project directories");
     let log_dir = proj_dirs.data_local_dir().join("logs");
     std::fs::create_dir_all(&log_dir).expect("Failed to create log directory");
 
-    // Daily rolling with max 5 files
+    // ──────────────────────────────────────────────────────────────────────
+    // ROTATION: Daily with max 5 files (tracing-appender 0.2 limitation)
+    // ──────────────────────────────────────────────────────────────────────
+    // tracing-appender 0.2 only supports time-based rotation (minutely/hourly/daily/never).
+    // For true size-based rotation (e.g., 10MB files), use the `logroller` crate instead.
+    // Daily + max_files=5 gives ~5 days of logs before oldest is deleted.
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
-        .filename_prefix("engine")
+        .filename_prefix("engine")     // engine.YYYY-MM-DD.log
         .filename_suffix("log")
         .max_log_files(5)
         .build(&log_dir)
         .expect("Failed to create rolling file appender");
 
+    // ──────────────────────────────────────────────────────────────────────
+    // NON-BLOCKING WRITER: Critical for real-time audio applications
+    // ──────────────────────────────────────────────────────────────────────
+    // `tracing_appender::non_blocking` wraps the file appender in a crossbeam channel
+    // with a dedicated writer thread. This means:
+    // 
+    //   ✅ Log calls (info!, trace!, etc.) return immediately (~nanoseconds)
+    //   ✅ JSON formatting happens on the writer thread, not the caller
+    //   ✅ File I/O (syscalls, disk latency) happens on the writer thread
+    //   ✅ Audio callback / hot path NEVER blocks on logging
+    // 
+    // The trade-off: log events are buffered in memory. If the process crashes
+    // before the writer thread flushes, recent logs may be lost. The `LogGuard`
+    // ensures graceful shutdown by flushing on drop.
     let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
 
-    // JSON structured logging for machine parsing
+    // ──────────────────────────────────────────────────────────────────────
+    // JSON STRUCTURED LOGGING: Machine-parseable, rich metadata
+    // ──────────────────────────────────────────────────────────────────────
+    // Each log line is a JSON object with:
+    //   - timestamp: ISO 8601 UTC (e.g., "2026-10-22T19:30:39.220867Z")
+    //   - level: "TRACE" | "DEBUG" | "INFO" | "WARN" | "ERROR"
+    //   - fields: { "message": "...", "custom_key": "custom_value", ... }
+    //   - target: crate/module path (e.g., "engine", "engine::audio_io")
+    //   - filename + line_number: source location
+    //   - threadName + threadId: for correlating concurrent operations
+    //   - span context: current span + span list (for nested operations)
+    //
+    // Benefits:
+    //   ✅ Trivially ingestible by log aggregators (Loki, Elastic, Datadog)
+    //   ✅ Structured fields enable queries: `level=ERROR target=engine`
+    //   ✅ Spans track causality across async boundaries
     let json_layer = fmt::layer()
-        .json()
-        .with_ansi(false)
-        .with_current_span(true)
-        .with_span_list(true)
-        .with_thread_ids(true)
-        .with_thread_names(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_writer(non_blocking);
+        .json()                          // JSON output (not human-readable text)
+        .with_ansi(false)                // No ANSI color codes in file
+        .with_current_span(true)         // Include current span fields
+        .with_span_list(true)            // Include parent span fields
+        .with_thread_ids(true)           // Thread ID for correlation
+        .with_thread_names(true)         // Thread name (e.g., "io-control", "tokio-runtime-worker")
+        .with_file(true)                 // Source file (e.g., "crates/engine/src/main.rs")
+        .with_line_number(true)          // Source line number
+        .with_writer(non_blocking);      // Non-blocking writer (see above)
 
+    // ──────────────────────────────────────────────────────────────────────
+    // LEVEL FILTERING: Runtime control via RUST_LOG env var
+    // ──────────────────────────────────────────────────────────────────────
+    // Examples:
+    //   RUST_LOG=info                           # Default: INFO and above
+    //   RUST_LOG=trace                          # Everything (verbose!)
+    //   RUST_LOG=dsp=trace,engine=debug         # Per-module control
+    //   RUST_LOG="dsp::vco=trace,dsp::vcf=debug" # Per-submodule control
+    //
+    // PERFORMANCE NOTE:
+    //   - Disabled macros (trace! when level=info) compile to near-no-op (~2x overhead vs no logging)
+    //   - Filtered macros check level at runtime (~same as disabled)
+    //   - Actually logging serializes JSON + sends to channel (~2000x overhead)
+    //   - NEVER log at trace/debug level on audio callback in production!
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // Registry combines filter + layer. Using registry (not fmt().init()) allows
+    // multiple layers (e.g., file + stdout) with different filters per layer.
     tracing_subscriber::registry()
         .with(env_filter)
         .with(json_layer)

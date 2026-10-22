@@ -14,7 +14,43 @@ authors = ["Stephan Lagerwaard <stephanlagerwaard@gmail.com>"]
 edition = "2021"
 
 [workspace.dependencies]
+# ──────────────────────────────────────────────────────────────────────
+# TRACING: Structured, high-performance logging
+# ──────────────────────────────────────────────────────────────────────
+# tracing = "0.1" with "std" feature: Core macros (info!, trace!, span!, etc.)
+#   - Zero-cost when disabled (compiles to no-op at disabled levels)
+#   - ~2x overhead when filtered by level (runtime check)
+#   - ~2000x overhead when actually logging (JSON + channel send)
+#   - Use RUST_LOG to control: trace/debug/info/warn/error per module
 tracing = { version = "0.1", features = ["std"] }
+
+# tracing-subscriber = "0.3": Subscriber implementation + layers
+#   - "fmt": Formatting layer (JSON or text)
+#   - "env-filter": RUST_LOG environment variable filtering
+#   - "registry": Span registry for span context (current_span, span_list)
+#   - "json": JSON formatter (structured output)
+# 
+# ARCHITECTURE: Registry + Layer pattern allows multiple outputs with
+# different filters (e.g., file=DEBUG + stdout=INFO). See rack/main.rs.
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "registry", "json"] }
+
+# tracing-appender = "0.2": File appenders + non-blocking wrapper
+#   - "parking_lot": Faster mutex for non-blocking channel (vs std::sync)
+# 
+# NON-BLOCKING WRITER (critical for real-time audio):
+#   - Wraps any `MakeWriter` in crossbeam channel + dedicated writer thread
+#   - Log macros return immediately (~ns); formatting + I/O on writer thread
+#   - Audio callback NEVER blocks on disk I/O
+# 
+# ROTATION: tracing-appender 0.2 only supports TIME-based rotation
+# (minutely/hourly/daily/never). For SIZE-based rotation (e.g., 10MB files),
+# use the `logroller` crate instead. See rack/main.rs for daily+max_files=5.
 tracing-appender = { version = "0.2", features = ["parking_lot"] }
+
+# directories = "5.0": Platform-standard config/data/cache directories
+#   - Linux:   XDG ($XDG_DATA_HOME or ~/.local/share)
+#   - macOS:   ~/Library/Application Support/
+#   - Windows: %LOCALAPPDATA% (FOLDERID_LocalAppData)
+# 
+# Avoids hardcoding paths; respects OS conventions.
 directories = "5.0"
